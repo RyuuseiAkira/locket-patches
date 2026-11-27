@@ -29,7 +29,7 @@ internal object HermesHbc96CameraMutations {
             "Expected 1 '${mutation.factoryFunctionName}' function, found ${factories.size}."
         }
         val factory = factories[0]
-        val factoryCode = ctx.baseBundle.copyOfRange(factory.codeOffset, factory.codeOffset + factory.codeSize)
+        val factoryCode = ctx.functionCode(factory)
         val factoryIns = HermesHbc96Asm.decodeFunction(factoryCode)
 
         val closureSlots = resolveFactoryCaptureSlots(
@@ -55,7 +55,7 @@ internal object HermesHbc96CameraMutations {
 
         patchPinchWorkletFactoryInitData(ctx, factory, mutation)
 
-        val workletCode = ctx.baseBundle.copyOfRange(worklet.codeOffset, worklet.codeOffset + worklet.codeSize)
+        val workletCode = ctx.functionCode(worklet)
         val workletIns = HermesHbc96Asm.decodeFunction(workletCode)
         val (maxReg, _) = HermesHbc96Asm.scanMaxRegisterAndReadCache(workletCode, workletIns)
         require(maxReg >= 0) { "Empty pinch worklet #${worklet.index}." }
@@ -114,7 +114,7 @@ internal object HermesHbc96CameraMutations {
         factory: HermesHbc96.FunctionMeta,
         mutation: HermesHbc96.Mutation.ImprovePinchZoomWorklet,
     ): Int {
-        val code = ctx.baseBundle.copyOfRange(factory.codeOffset, factory.codeOffset + factory.codeSize)
+        val code = ctx.functionCode(factory)
         val ins = HermesHbc96Asm.decodeFunction(code)
         val (maxReg, maxRCache) = HermesHbc96Asm.scanMaxRegisterAndReadCache(code, ins)
 
@@ -351,7 +351,7 @@ internal object HermesHbc96CameraMutations {
     ): Pair<Int, Int> {
         val backFacingId = ctx.stringIds.getValue("backFacing")
         val lensSwitchId = ctx.stringIds.getValue("lensSwitch")
-        val code = ctx.baseBundle.copyOfRange(fn.codeOffset, fn.codeOffset + fn.codeSize)
+        val code = ctx.functionCode(fn)
         val ins = HermesHbc96Asm.decodeFunction(code)
         val (maxReg, maxRCache) = HermesHbc96Asm.scanMaxRegisterAndReadCache(code, ins)
 
@@ -507,7 +507,7 @@ internal object HermesHbc96CameraMutations {
         t1Fn: HermesHbc96.FunctionMeta,
         lensSwitchEnvSlot: Int,
     ) {
-        val code = ctx.baseBundle.copyOfRange(t1Fn.codeOffset, t1Fn.codeOffset + t1Fn.codeSize)
+        val code = ctx.functionCode(t1Fn)
         val ins = HermesHbc96Asm.decodeFunction(code)
         val (maxReg, _) = HermesHbc96Asm.scanMaxRegisterAndReadCache(code, ins)
 
@@ -653,7 +653,7 @@ internal object HermesHbc96CameraMutations {
         val idIsArray = ctx.stringIds.getValue("isArray")
         val idLength = ctx.stringIds.getValue("length")
 
-        val code = ctx.baseBundle.copyOfRange(homeFn.codeOffset, homeFn.codeOffset + homeFn.codeSize)
+        val code = ctx.functionCode(homeFn)
         val ins = HermesHbc96Asm.decodeFunction(code)
         val (maxReg, maxRCache) = HermesHbc96Asm.scanMaxRegisterAndReadCache(code, ins)
 

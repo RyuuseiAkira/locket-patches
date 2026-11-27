@@ -198,17 +198,39 @@ object HermesHbc96 {
 
         fun relocatedTailBytes(): ByteArray = relocatedTail.toByteArray()
 
+        fun functionCode(fn: FunctionMeta): ByteArray {
+            return if (fn.codeOffset + fn.codeSize <= tailBaseOffset) {
+                baseBundle.copyOfRange(fn.codeOffset, fn.codeOffset + fn.codeSize)
+            } else {
+                val relOff = fn.codeOffset - tailBaseOffset
+                val tail = relocatedTail.toByteArray()
+                require(relOff >= 0 && relOff + fn.codeSize <= tail.size) {
+                    "Relocated function #${fn.index} (${relOff} + ${fn.codeSize}) exceeds tail bounds (${tail.size})."
+                }
+                tail.copyOfRange(relOff, relOff + fn.codeSize)
+            }
+        }
+
         fun functionContainsAllStrings(fn: FunctionMeta, requiredStrings: List<String>): Boolean {
             if (requiredStrings.isEmpty()) return true
             val remaining = LinkedHashSet<Int>(requiredStrings.size)
             for (s in requiredStrings) remaining.add(stringIds.getValue(s))
-            val ins = HermesHbc96Asm.decodeFunction(baseBundle, fn.codeOffset, fn.codeOffset + fn.codeSize)
+            val buf: ByteArray
+            val startOff: Int
+            if (fn.codeOffset + fn.codeSize <= tailBaseOffset) {
+                buf = baseBundle
+                startOff = fn.codeOffset
+            } else {
+                buf = functionCode(fn)
+                startOff = 0
+            }
+            val ins = HermesHbc96Asm.decodeFunction(buf, startOff, startOff + fn.codeSize)
             for (item in ins) {
-                val off = fn.codeOffset + item.offset
-                val id = HermesHbc96Asm.readGetById(baseBundle, off)?.stringId
-                    ?: HermesHbc96Asm.readPutById(baseBundle, off)?.stringId
-                    ?: HermesHbc96Asm.readPutNewOwnById(baseBundle, off)?.stringId
-                    ?: HermesHbc96Asm.readLoadConstString(baseBundle, off)?.second
+                val off = startOff + item.offset
+                val id = HermesHbc96Asm.readGetById(buf, off)?.stringId
+                    ?: HermesHbc96Asm.readPutById(buf, off)?.stringId
+                    ?: HermesHbc96Asm.readPutNewOwnById(buf, off)?.stringId
+                    ?: HermesHbc96Asm.readLoadConstString(buf, off)?.second
                 if (id != null) {
                     remaining.remove(id)
                     if (remaining.isEmpty()) return true
