@@ -22,15 +22,11 @@ Provide an unmodified APK / APKM (such as `com.locket.Locket` `1.247.1`).
 ## 🩹 Patches
 
 <!-- PATCHES_START EXPANDED -->
+> **[v1.0.0-dev.1](https://github.com/RyuuseiAkira/locket-patches/releases/tag/v1.0.0-dev.1)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`dev`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**1 patch** across **1 app**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
 
-<!-- Populated automatically by release.yml via .github/scripts/generate_patches_readme.py -->
-
-#### A list of patches will automatically be shown here after the first release is created.
-
-| 💊&nbsp;Patch | 📜&nbsp;Description |
-|----------|----------------|
-| **Unlock Gold** | Unlocks client-side Locket Gold features by overriding the remote config subscription check in Hermes bytecode (`assets/index.android.bundle`) and spoofing the original APK signature for Firebase services. |
-
+| # | App | Patches | Version | Package |
+|---|---|---|---|---|
+| 1 | [**Locket Widget**](PATCHES.md#locket-widget-comlocketlocket) | 1 | `1.247.1` | [`com.locket.Locket`](https://play.google.com/store/apps/details?id=com.locket.Locket) |
 <!-- PATCHES_END -->
 
 ## 📚 Documentation
