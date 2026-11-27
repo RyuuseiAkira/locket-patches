@@ -1,0 +1,210 @@
+{
+  "NOTE": "Do NOT manually edit this file. This file is automatically updated when semantic release (release.yml) runs. Manually editing this file can break your releases and break third party tools that use this file.",
+  "version": "1.0.0-dev.6",
+  "patches": [
+    {
+      "name": "Bypass forced updates",
+      "description": "Prevents forced update dialogs, Google Play in-app update flows, and automatic review prompts.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Disable tracking and analytics",
+      "description": "Disables AppsFlyer, Amplitude, Sentry tracing, Firebase Analytics logging, and native camera debug telemetry.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Hide upgrade and invite prompts",
+      "description": "Hides Gold subscription banners, feature discovery popups, settings upsells, and rewarded referral prompts.",
+      "default": false,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Remove ads",
+      "description": "Disables history feed ads, ad reporting, and client-side ad eligibility gates.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Remove share watermarks",
+      "description": "Strips Locket overlay watermarks from shared History and Moment images while preserving normal saving and scaling.",
+      "default": false,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Unlock Gold",
+      "description": "Unlocks client-side Locket Gold features by overriding the remote config subscription check.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    }
+  ]
+}
