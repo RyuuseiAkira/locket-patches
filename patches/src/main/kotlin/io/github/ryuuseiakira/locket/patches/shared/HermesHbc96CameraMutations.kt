@@ -91,7 +91,11 @@ internal object HermesHbc96CameraMutations {
         asm.op(HermesHbc96.OP_RET, 0)
 
         val newCode = asm.build()
-        val requiredFrame = maxOf(worklet.frameSize, 9)
+        val workletCalls = HermesHbc96Asm.scanCallFrameRequirements(
+            newCode,
+            HermesHbc96Asm.decodeFunction(newCode),
+        )
+        val requiredFrame = maxOf(worklet.frameSize, 8 + 1 + workletCalls.maxOutgoingSlots)
         val requiredCache = maxOf(worklet.highestReadCacheIndex, 5)
         val updatedOffset = ctx.writeFunctionCode(
             fn = worklet,
@@ -162,6 +166,7 @@ internal object HermesHbc96CameraMutations {
         val resumeOff = ins[putInitIdx + 1].offset
         val origPutBytes = code.copyOfRange(putInstr.offset, resumeOff)
 
+        val origCalls = HermesHbc96Asm.scanCallFrameRequirements(code, ins)
         val s0 = maxReg + 1
         val s1 = maxReg + 2
         val s2 = maxReg + 3
@@ -169,9 +174,8 @@ internal object HermesHbc96CameraMutations {
         val s4 = maxReg + 5
         val s5 = maxReg + 6
         val s6 = maxReg + 7
-        val newFrameSize = maxOf(factory.frameSize, s6 + 1)
         val newRCache = maxRCache + 3
-        require(newFrameSize < 128 && newRCache <= 0xff) {
+        require(s6 <= 0xff && newRCache <= 0xff) {
             "Worklet factory register/cache budget exhausted (#${factory.index})."
         }
 
@@ -231,6 +235,13 @@ internal object HermesHbc96CameraMutations {
             patchOffset = putInstr.offset,
             replacedLength = resumeOff - putInstr.offset,
             targetOffset = tailOff,
+        )
+        val newFrameSize = computeExpandedFrameSize(
+            fn = factory,
+            origCalls = origCalls,
+            maxLocalRegUsed = s6,
+            minOutgoingSlots = 0,
+            tailBytes,
         )
         return ctx.writeFunctionCode(
             fn = factory,
@@ -354,11 +365,12 @@ internal object HermesHbc96CameraMutations {
         val code = ctx.functionCode(fn)
         val ins = HermesHbc96Asm.decodeFunction(code)
         val (maxReg, maxRCache) = HermesHbc96Asm.scanMaxRegisterAndReadCache(code, ins)
+        val origCalls = HermesHbc96Asm.scanCallFrameRequirements(code, ins)
 
         val scratchReg = maxReg + 1
         val newRCache = maxRCache + 1
         val newEnvSlot = fn.environmentSize
-        require(scratchReg < 128 && newRCache <= 0xff && newEnvSlot <= 0xff) {
+        require(scratchReg <= 0xff && newRCache <= 0xff && newEnvSlot <= 0xff) {
             "CameraOverlayZoomButton register/cache/env budget exhausted."
         }
 
@@ -469,11 +481,19 @@ internal object HermesHbc96CameraMutations {
         HermesHbc96Asm.overwriteWithJmpLongAndPad(code, missOff, missLen, tail3Off)
         tails.write(t3Bytes)
 
-        val combined = code + tails.toByteArray()
+        val tailBytes = tails.toByteArray()
+        val newFrameSize = computeExpandedFrameSize(
+            fn = fn,
+            origCalls = origCalls,
+            maxLocalRegUsed = scratchReg,
+            minOutgoingSlots = 0,
+            tailBytes,
+        )
+        val combined = code + tailBytes
         ctx.writeFunctionCode(
             fn = fn,
             newCode = combined,
-            newFrameSize = maxOf(fn.frameSize, scratchReg + 1),
+            newFrameSize = newFrameSize,
             newEnvironmentSize = fn.environmentSize + 1,
             newReadCacheIndex = newRCache,
         )
@@ -510,6 +530,7 @@ internal object HermesHbc96CameraMutations {
         val code = ctx.functionCode(t1Fn)
         val ins = HermesHbc96Asm.decodeFunction(code)
         val (maxReg, _) = HermesHbc96Asm.scanMaxRegisterAndReadCache(code, ins)
+        val origCalls = HermesHbc96Asm.scanCallFrameRequirements(code, ins)
 
         require(ins.isNotEmpty() && ins[0].opcode == HermesHbc96Asm.OP_GET_ENVIRONMENT) {
             "Expected GetEnvironment prologue in onPress closure #${t1Fn.index}."
@@ -530,14 +551,21 @@ internal object HermesHbc96CameraMutations {
         val rMin = code[callOff + 6].toInt() and 0xff
         val returnOff = ins[call4Idx + 1].offset
 
-        // Hermes Call pushes arguments from (frameSize - 7) downward: ThisArg, arg1..arg4.
-        val newFrameSize = maxOf(t1Fn.frameSize, maxReg + 1 + 11)
-        require(newFrameSize < 128) { "Required frameSize $newFrameSize exceeds SmallFuncHeader limit." }
+        // Hermes Call pushes arguments from (frameSize - 7) downward: ThisArg, arg1..arg4 (argc = 5 -> 11 outgoing slots).
+        val newFrameSize = computeExpandedFrameSize(
+            fn = t1Fn,
+            origCalls = origCalls,
+            maxLocalRegUsed = maxReg,
+            minOutgoingSlots = 11,
+        )
         val slotThis = newFrameSize - 7
         val slotArg1 = newFrameSize - 8
         val slotArg2 = newFrameSize - 9
         val slotArg3 = newFrameSize - 10
         val slotArg4 = newFrameSize - 11
+        require(maxReg <= 0xff && slotThis <= 0xff && slotArg4 > maxReg) {
+            "Required frameSize $newFrameSize / outgoing slots ($slotArg4..$slotThis) exceed Reg8 range."
+        }
 
         val tailOff = code.size
         val b = HermesHbc96Asm.Builder(tailOff)
@@ -734,6 +762,7 @@ internal object HermesHbc96CameraMutations {
         val site2ResumeOff = ins[overlaySiteIdx + 1].offset
         val origPutBackFacingBytes = code.copyOfRange(site2Off, site2ResumeOff)
 
+        val origCalls = HermesHbc96Asm.scanCallFrameRequirements(code, ins)
         val rTele = maxReg + 1
         val s0 = maxReg + 2
         val s1 = maxReg + 3
@@ -742,7 +771,7 @@ internal object HermesHbc96CameraMutations {
         val s4 = maxReg + 6
         val s5 = maxReg + 7
         val rcBase = maxRCache
-        require(s5 < 128 && rcBase + 7 <= 0xff) {
+        require(s5 <= 0xff && rcBase + 7 <= 0xff) {
             "Home register/cache budget exhausted (maxReg=$maxReg, maxRCache=$maxRCache)."
         }
 
@@ -814,12 +843,48 @@ internal object HermesHbc96CameraMutations {
         val tailBBytes = b.build()
         HermesHbc96Asm.overwriteWithJmpLongAndPad(code, site2Off, site2Len, tailBOff)
 
+        val newFrameSize = computeExpandedFrameSize(
+            fn = homeFn,
+            origCalls = origCalls,
+            maxLocalRegUsed = s5,
+            minOutgoingSlots = 0,
+            tailABytes,
+            tailBBytes,
+        )
+
         return ctx.writeFunctionCode(
             fn = homeFn,
             newCode = code + tailABytes + tailBBytes,
-            newFrameSize = maxOf(homeFn.frameSize, s5 + 1),
+            newFrameSize = newFrameSize,
             newReadCacheIndex = rcBase + 7,
         )
+    }
+
+    /**
+     * Computes the required `frameSize` after allocating local registers up to [maxLocalRegUsed]
+     * and preserving/appending outgoing calls in [origCalls] and [tails], rejecting expansion when
+     * the original function contains stack-top-relative calls whose slot offsets depend on `frameSize`.
+     */
+    private fun computeExpandedFrameSize(
+        fn: HermesHbc96.FunctionMeta,
+        origCalls: HermesHbc96Asm.CallFrameSummary,
+        maxLocalRegUsed: Int,
+        minOutgoingSlots: Int = 0,
+        vararg tails: ByteArray,
+    ): Int {
+        var maxOutgoing = maxOf(origCalls.maxOutgoingSlots, minOutgoingSlots)
+        for (tail in tails) {
+            val tailIns = HermesHbc96Asm.decodeFunction(tail)
+            val tailCalls = HermesHbc96Asm.scanCallFrameRequirements(tail, tailIns)
+            if (tailCalls.maxOutgoingSlots > maxOutgoing) {
+                maxOutgoing = tailCalls.maxOutgoingSlots
+            }
+        }
+        val requiredFrame = maxOf(fn.frameSize, maxLocalRegUsed + 1 + maxOutgoing)
+        require(!origCalls.hasStackTopRelativeCall || requiredFrame == fn.frameSize) {
+            "Cannot expand frameSize on #${fn.index} containing stack-top-relative calls."
+        }
+        return requiredFrame
     }
 
     private fun resolveUniqueFunction(

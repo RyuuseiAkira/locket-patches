@@ -37,9 +37,17 @@ internal object HermesHbc96Asm {
     const val OP_GET_BY_VAL: Byte = 0x49
     const val OP_PUT_BY_VAL: Byte = 0x4a
     const val OP_CALL: Byte = 0x4f
+    const val OP_CONSTRUCT: Byte = 0x50
+    const val OP_CALL1: Byte = 0x51
+    const val OP_CALL_DIRECT: Byte = 0x52
     const val OP_CALL2: Byte = 0x53
     const val OP_CALL3: Byte = 0x54
     const val OP_CALL4: Byte = 0x55
+    const val OP_CALL_LONG: Byte = 0x56
+    const val OP_CONSTRUCT_LONG: Byte = 0x57
+    const val OP_CALL_DIRECT_LONG_INDEX: Byte = 0x58
+    const val OP_CALL_BUILTIN: Byte = 0x59
+    const val OP_CALL_BUILTIN_LONG: Byte = 0x5a
     const val OP_CREATE_CLOSURE: Byte = 0x64
     const val OP_CREATE_CLOSURE_LONG_INDEX: Byte = 0x65
     const val OP_LOAD_PARAM: Byte = 0x6c
@@ -173,6 +181,52 @@ internal object HermesHbc96Asm {
             }
         }
         return maxReg to maxReadCache
+    }
+
+    data class CallFrameSummary(
+        val maxOutgoingSlots: Int,
+        val hasStackTopRelativeCall: Boolean,
+    )
+
+    /**
+     * Computes the maximum caller-top frame slots reserved by outgoing call instructions (`6` Hermes
+     * metadata slots + explicit `argCount` including `this`) and whether any instruction addresses
+     * stack-top-relative slots (`Call`, `Construct`, `CallDirect`, `CallBuiltin`, or their
+     * `*Long` variants) whose indices shift if `frameSize` grows.
+     */
+    fun scanCallFrameRequirements(
+        code: ByteArray,
+        instructions: List<DecodedInstruction>,
+        baseOffset: Int = 0,
+    ): CallFrameSummary {
+        var maxOutgoingSlots = 0
+        var hasStackTopRelativeCall = false
+        for (ins in instructions) {
+            val pos = baseOffset + ins.offset
+            val slots = when (ins.opcode) {
+                OP_CALL1 -> 7
+                OP_CALL2 -> 8
+                OP_CALL3 -> 9
+                OP_CALL4 -> 10
+                OP_CALL, OP_CONSTRUCT, OP_CALL_BUILTIN -> {
+                    hasStackTopRelativeCall = true
+                    6 + (code[pos + 3].toInt() and 0xff)
+                }
+                OP_CALL_DIRECT, OP_CALL_DIRECT_LONG_INDEX -> {
+                    hasStackTopRelativeCall = true
+                    6 + (code[pos + 2].toInt() and 0xff)
+                }
+                OP_CALL_LONG, OP_CONSTRUCT_LONG, OP_CALL_BUILTIN_LONG -> {
+                    hasStackTopRelativeCall = true
+                    val argc = HermesHbc96.readI32Le(code, pos + 3)
+                    require(argc >= 0) { "Negative long call argCount ($argc) at +$pos." }
+                    6 + argc
+                }
+                else -> 0
+            }
+            if (slots > maxOutgoingSlots) maxOutgoingSlots = slots
+        }
+        return CallFrameSummary(maxOutgoingSlots, hasStackTopRelativeCall)
     }
 
     fun readGetById(bytes: ByteArray, pos: Int): IdAccess? {

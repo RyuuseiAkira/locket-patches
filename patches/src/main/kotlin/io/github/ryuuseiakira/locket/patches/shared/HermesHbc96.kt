@@ -178,8 +178,8 @@ object HermesHbc96 {
         var highestReadCacheIndex: Int,
         var highestWriteCacheIndex: Int,
         var flags: Int,
-        val overflowed: Boolean,
-        val largeHeaderOffset: Int,
+        var overflowed: Boolean,
+        var largeHeaderOffset: Int,
     ) {
         val hasExceptionHandler: Boolean
             get() = (flags and 0x08) != 0
@@ -750,8 +750,11 @@ object HermesHbc96 {
         relocatedTail.write(large)
 
         writeI32Le(baseBundle, hOff, newLargeOff and 0xffff)
+        writeI32Le(baseBundle, hOff + 4, 0)
         writeI32Le(baseBundle, hOff + 8, (newLargeOff ushr 16) and 0xffff)
         writeI32Le(baseBundle, hOff + 12, (fn.flags or 0x20) shl 24)
+        fn.overflowed = true
+        fn.largeHeaderOffset = newLargeOff
     }
 
     private fun applyRemoteConfigReturnConst(
