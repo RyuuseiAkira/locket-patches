@@ -2,8 +2,9 @@ rootProject.name = "locket-patches"
 
 pluginManagement {
     repositories {
-        gradlePluginPortal()
+        mavenCentral()
         google()
+        gradlePluginPortal()
         maven {
             name = "GitHubPackages"
             url = uri("https://maven.pkg.github.com/MorpheApp/registry")
