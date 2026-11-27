@@ -1,3 +1,9 @@
+## [1.0.0-dev.6](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.5...v1.0.0-dev.6) (2026-11-27)
+
+### 🐛 Bug Fixes
+
+* Remove camera patches and harden HBC instruction scanning ([26e4457](https://github.com/RyuuseiAkira/locket-patches/commit/26e44573bf8d1c30085af195a2f3270394600d86))
+
 ## [1.0.0-dev.5](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.4...v1.0.0-dev.5) (2026-11-27)
 
 ### 🐛 Bug Fixes
