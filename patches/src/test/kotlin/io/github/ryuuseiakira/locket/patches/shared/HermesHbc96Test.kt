@@ -295,6 +295,443 @@ class HermesHbc96Test {
         }
     }
 
+    @Test
+    fun `rewrites pinch worklet bytecode from factory closure slot mapping and patches factory initData`() {
+        val strings = listOf(
+            "HomeCameraTsx3Factory",
+            "HomeCameraTsx3",
+            "__initData",
+            "code",
+            "indexOf",
+            "__closure",
+            "slice",
+            ".",
+            "(",
+            ")",
+            ",",
+            "*",
+            ";",
+            "}",
+            "Math",
+            "zoom",
+            "set",
+            "min",
+            "max",
+            "maxZoom",
+            "minZoom",
+            "pinchStartZoom",
+            "value",
+            "pow",
+            "event",
+            "scale",
+        )
+        val sid = { name: String -> strings.indexOf(name) }
+
+        val factoryAsm = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_CREATE_ENVIRONMENT, 0)
+            op(HermesHbc96Asm.OP_LOAD_PARAM, 2, 1)
+            getById(6, 2, 1, sid("zoom"))
+            storeToEnvironment(0, 3, 6)
+            getById(5, 2, 2, sid("minZoom"))
+            storeToEnvironment(0, 4, 5)
+            getById(4, 2, 3, sid("pinchStartZoom"))
+            storeToEnvironment(0, 5, 4)
+            getById(3, 2, 4, sid("maxZoom"))
+            storeToEnvironment(0, 6, 3)
+            op(HermesHbc96Asm.OP_CREATE_CLOSURE, 0, 0, 1, 0) // func #1 = HomeCameraTsx3
+            op(HermesHbc96.OP_NEW_OBJECT, 1)
+            putNewOwnById(1, 2, sid("code"))
+            op(
+                HermesHbc96Asm.OP_PUT_BY_ID,
+                0,
+                1,
+                1,
+                sid("__initData") and 0xff,
+                (sid("__initData") ushr 8) and 0xff,
+            )
+            op(HermesHbc96.OP_RET, 0)
+        }.build()
+
+        // Intentionally tiny original worklet (4 bytes) to exercise relocation + DebugInfo shift!
+        val tinyWorklet = byteArrayOf(HermesHbc96.OP_LOAD_CONST_UNDEFINED, 0x00, HermesHbc96.OP_RET, 0x00)
+
+        val bundle = buildSyntheticBundle(
+            strings = strings,
+            functions = listOf(
+                SyntheticFunction(nameId = sid("HomeCameraTsx3Factory"), code = factoryAsm, paramCount = 2, frameSize = 8, readCacheCount = 4),
+                SyntheticFunction(nameId = sid("HomeCameraTsx3"), code = tinyWorklet, paramCount = 2, frameSize = 8),
+            ),
+            includeDebugTrailer = true,
+        )
+        val origDbgOff = readI32Le(bundle, 0x68)
+        assertTrue(origDbgOff > 0)
+
+        val mutation = HermesHbc96.Mutation.ImprovePinchZoomWorklet("HomeCameraTsx3Factory", "HomeCameraTsx3")
+        val res = HermesHbc96.patch(bundle, mutation)
+        assertTrue(res.bytes.size > bundle.size)
+        val newDbgOff = readI32Le(res.bytes, 0x68)
+        assertTrue(newDbgOff > origDbgOff)
+        assertEquals(0, newDbgOff and 3)
+        assertEquals(res.bytes.size, readI32Le(res.bytes, 0x20))
+        assertValidSha1Footer(res.bytes)
+
+        // Both factory (#0) and worklet (#1) should relocate before DebugInfo and decode cleanly.
+        for (idx in 0..1) {
+            val hOff = HermesHbc96.HEADER_SIZE + idx * 16
+            val newOff = readI32Le(res.bytes, hOff) and 0x1ffffff
+            val newSz = readI32Le(res.bytes, hOff + 4) and 0x7fff
+            assertTrue(newOff >= origDbgOff && newOff + newSz <= newDbgOff)
+            assertTrue(HermesHbc96Asm.decodeFunction(res.bytes, newOff, newOff + newSz).isNotEmpty())
+        }
+
+        // Worklet #1 frame/cache minimums enforced.
+        val h1 = HermesHbc96.HEADER_SIZE + 16
+        val w2 = readI32Le(res.bytes, h1 + 8)
+        val w3 = readI32Le(res.bytes, h1 + 12)
+        assertTrue(((w2 ushr 25) and 0x7f) >= 9)
+        assertTrue(((w3 ushr 8) and 0xff) >= 5)
+
+        // Applying a second time fails cleanly once factory references synthesized initData helpers.
+        assertFailsWith<IllegalArgumentException> {
+            HermesHbc96.patch(res.bytes, mutation)
+        }
+    }
+
+    @Test
+    fun `enables telephoto zoom toggle cleanly across synthetic Home, button, onPress, and getNextZoomValue`() {
+        val strings = listOf(
+            "Home",
+            "getNextZoomValue",
+            "device",
+            "zoomProps",
+            "minZoom",
+            "neutralZoom",
+            "zoom",
+            "back",
+            "backFacing",
+            "camera_theme",
+            "lensSwitch",
+            "maxZoom",
+            "telephone",
+            "slice",
+            "photo",
+            "type",
+            "physicalDevices",
+            "Array",
+            "isArray",
+            "length",
+            "CameraOverlayButton",
+            "useDeviceOrientationRotationStyle",
+            "c",
+            "set",
+            "value",
+            "",
+            "overlayZoomButtonProps",
+        )
+        val sid = { name: String -> strings.indexOf(name) }
+
+        // fn #0: getNextZoomValue (paramCount = 4)
+        val nextZoomCode = byteArrayOf(
+            HermesHbc96Asm.OP_LOAD_PARAM, 0, 1,
+            HermesHbc96Asm.OP_LOAD_PARAM, 2, 2,
+            HermesHbc96Asm.OP_LOAD_PARAM, 1, 3,
+            HermesHbc96.OP_RET, 0,
+        )
+
+        // fn #1: onPress t1 (env0 -> slot 0/1/2/..., calls Call4 on fn #0)
+        val t1Code = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_GET_ENVIRONMENT, 0, 0)
+            loadFromEnvironment(8, 0, 0)
+            loadFromEnvironment(7, 0, 1)
+            loadFromEnvironment(4, 0, 0)
+            loadFromEnvironment(1, 0, 2)
+            op(HermesHbc96.OP_LOAD_CONST_UNDEFINED, 0)
+            op(HermesHbc96Asm.OP_CALL4, 4, 8, 0, 7, 4, 1)
+            op(HermesHbc96.OP_RET, 0)
+        }.build()
+
+        // fn #2: CameraOverlayZoomButton render fn (empty name, paramCount = 2)
+        val buttonCode = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_CREATE_ENVIRONMENT, 0)
+            op(HermesHbc96Asm.OP_LOAD_PARAM, 2, 1)
+            op(HermesHbc96Asm.OP_GET_ENVIRONMENT, 1, 0)
+            op(HermesHbc96Asm.OP_LOAD_CONST_UINT8, 3, 12) // c(12)
+            op(HermesHbc96.OP_NEW_OBJECT, 3)
+            getById(4, 2, 2, sid("zoom"))
+            storeToEnvironment(0, 0, 4)
+            getById(9, 2, 3, sid("neutralZoom"))
+            storeToEnvironment(0, 1, 9)
+            getById(12, 2, 4, sid("minZoom"))
+            storeToEnvironment(0, 2, 12)
+            // Use 6-byte GetById form (matching string IDs >= 256 in real bundles) for JmpLong splice headroom.
+            op(
+                HermesHbc96Asm.OP_GET_BY_ID,
+                10,
+                2,
+                5,
+                sid("backFacing") and 0xff,
+                (sid("backFacing") ushr 8) and 0xff,
+            )
+            getById(14, 1, 11, sid("useDeviceOrientationRotationStyle"))
+            getById(6, 1, 21, sid("CameraOverlayButton"))
+            op(HermesHbc96Asm.OP_LOAD_CONST_UINT8, 5, 3)
+            op(HermesHbc96Asm.OP_GET_BY_VAL, 5, 3, 5)
+            op(HermesHbc96Asm.OP_JMP, 20)
+            op(HermesHbc96Asm.OP_CREATE_CLOSURE, 0, 0, 1, 0)
+            op(HermesHbc96Asm.OP_LOAD_CONST_UINT8, 2, 3)
+            op(HermesHbc96Asm.OP_PUT_BY_VAL, 3, 2, 0)
+            op(HermesHbc96Asm.OP_MOV, 5, 0)
+            op(HermesHbc96.OP_RET, 5)
+        }.build()
+        val decodedBtn = HermesHbc96Asm.decodeFunction(buttonCode)
+        val jmpPos = decodedBtn.first { it.opcode == HermesHbc96Asm.OP_JMP }.offset
+        val closurePos = decodedBtn.first { it.opcode == HermesHbc96Asm.OP_CREATE_CLOSURE }.offset
+        val retPos = decodedBtn.last().offset
+        assertEquals(jmpPos + 2, closurePos)
+        buttonCode[jmpPos + 1] = (retPos - jmpPos).toByte()
+
+        // fn #3: Home
+        val homeCode = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_LESS, 50, 59, 58)
+            loadConstString(1, sid("camera_theme"))
+            putNewOwnById(23, 83, sid("device"))
+            putNewOwnById(23, 79, sid("zoomProps"))
+            putNewOwnById(23, 55, sid("overlayZoomButtonProps"))
+            putNewOwnById(55, 59, sid("minZoom"))
+            putNewOwnById(55, 58, sid("neutralZoom"))
+            putNewOwnById(55, 56, sid("zoom"))
+            loadConstString(56, sid("back"))
+            op(HermesHbc96Asm.OP_STRICT_EQ, 56, 57, 56)
+            // Use 5-byte PutNewOwnById form for JmpLong splice headroom.
+            op(
+                HermesHbc96Asm.OP_PUT_NEW_OWN_BY_ID,
+                55,
+                56,
+                sid("backFacing") and 0xff,
+                (sid("backFacing") ushr 8) and 0xff,
+            )
+            op(HermesHbc96.OP_RET, 55)
+        }.build()
+
+        val bundle = buildSyntheticBundle(
+            strings = strings,
+            functions = listOf(
+                SyntheticFunction(nameId = sid("getNextZoomValue"), code = nextZoomCode, paramCount = 4, frameSize = 4),
+                SyntheticFunction(nameId = sid(""), code = t1Code, paramCount = 1, frameSize = 19),
+                SyntheticFunction(nameId = sid(""), code = buttonCode, paramCount = 2, frameSize = 24, environmentSize = 3, readCacheCount = 21),
+                SyntheticFunction(nameId = sid("Home"), code = homeCode, paramCount = 2, frameSize = 95, readCacheCount = 40),
+            ),
+            includeDebugTrailer = true,
+        )
+
+        val res = HermesHbc96.patch(
+            bundle,
+            HermesHbc96.Mutation.EnableTelephotoZoomToggle(zoomThreshold = 3.0, zoomTolerance = 0.05),
+        )
+        assertValidSha1Footer(res.bytes)
+        assertEquals(res.bytes.size, readI32Le(res.bytes, 0x20))
+        val newDbgOff = readI32Le(res.bytes, 0x68)
+        assertTrue(newDbgOff > readI32Le(bundle, 0x68))
+        assertEquals(0, newDbgOff and 3)
+
+        for (idx in 0..3) {
+            val hOff = HermesHbc96.HEADER_SIZE + idx * 16
+            val off = readI32Le(res.bytes, hOff) and 0x1ffffff
+            val sz = readI32Le(res.bytes, hOff + 4) and 0x7fff
+            assertTrue(off + sz <= newDbgOff)
+            assertTrue(HermesHbc96Asm.decodeFunction(res.bytes, off, off + sz).isNotEmpty())
+        }
+        assertEquals(5, (readI32Le(res.bytes, HermesHbc96.HEADER_SIZE) ushr 25) and 0x7f)
+        val btnW3 = readI32Le(res.bytes, HermesHbc96.HEADER_SIZE + 2 * 16 + 12)
+        assertEquals(4, btnW3 and 0xff)
+        assertEquals(22, (btnW3 ushr 8) and 0xff)
+        assertFailsWith<IllegalArgumentException> {
+            HermesHbc96.patch(res.bytes, HermesHbc96.Mutation.EnableTelephotoZoomToggle())
+        }
+    }
+
+    @Test
+    fun `composes ImprovePinchZoomWorklet and EnableTelephotoZoomToggle in either order cleanly`() {
+        val strings = listOf(
+            "HomeCameraTsx3Factory",
+            "HomeCameraTsx3",
+            "__initData",
+            "code",
+            "indexOf",
+            "__closure",
+            "slice",
+            ".",
+            "(",
+            ")",
+            ",",
+            "*",
+            ";",
+            "}",
+            "Math",
+            "pow",
+            "min",
+            "max",
+            "pinchStartZoom",
+            "event",
+            "scale",
+            "Home",
+            "getNextZoomValue",
+            "device",
+            "zoomProps",
+            "minZoom",
+            "neutralZoom",
+            "zoom",
+            "back",
+            "backFacing",
+            "camera_theme",
+            "lensSwitch",
+            "maxZoom",
+            "telephone",
+            "photo",
+            "type",
+            "physicalDevices",
+            "Array",
+            "isArray",
+            "length",
+            "CameraOverlayButton",
+            "useDeviceOrientationRotationStyle",
+            "c",
+            "set",
+            "value",
+            "",
+            "overlayZoomButtonProps",
+        )
+        val sid = { name: String -> strings.indexOf(name) }
+
+        val factoryAsm = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_CREATE_ENVIRONMENT, 0)
+            op(HermesHbc96Asm.OP_LOAD_PARAM, 2, 1)
+            getById(6, 2, 1, sid("zoom"))
+            storeToEnvironment(0, 3, 6)
+            getById(5, 2, 2, sid("minZoom"))
+            storeToEnvironment(0, 4, 5)
+            getById(4, 2, 3, sid("pinchStartZoom"))
+            storeToEnvironment(0, 5, 4)
+            getById(3, 2, 4, sid("maxZoom"))
+            storeToEnvironment(0, 6, 3)
+            op(HermesHbc96Asm.OP_CREATE_CLOSURE, 0, 0, 1, 0)
+            op(HermesHbc96.OP_NEW_OBJECT, 1)
+            putNewOwnById(1, 2, sid("code"))
+            op(
+                HermesHbc96Asm.OP_PUT_BY_ID,
+                0,
+                1,
+                1,
+                sid("__initData") and 0xff,
+                (sid("__initData") ushr 8) and 0xff,
+            )
+            op(HermesHbc96.OP_RET, 0)
+        }.build()
+        val tinyWorklet = byteArrayOf(HermesHbc96.OP_LOAD_CONST_UNDEFINED, 0x00, HermesHbc96.OP_RET, 0x00)
+        val nextZoomCode = byteArrayOf(
+            HermesHbc96Asm.OP_LOAD_PARAM, 0, 1,
+            HermesHbc96Asm.OP_LOAD_PARAM, 2, 2,
+            HermesHbc96Asm.OP_LOAD_PARAM, 1, 3,
+            HermesHbc96.OP_RET, 0,
+        )
+        val t1Code = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_GET_ENVIRONMENT, 0, 0)
+            loadFromEnvironment(8, 0, 0)
+            loadFromEnvironment(7, 0, 1)
+            loadFromEnvironment(4, 0, 0)
+            loadFromEnvironment(1, 0, 2)
+            op(HermesHbc96.OP_LOAD_CONST_UNDEFINED, 0)
+            op(HermesHbc96Asm.OP_CALL4, 4, 8, 0, 7, 4, 1)
+            op(HermesHbc96.OP_RET, 0)
+        }.build()
+        val buttonCode = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_CREATE_ENVIRONMENT, 0)
+            op(HermesHbc96Asm.OP_LOAD_PARAM, 2, 1)
+            op(HermesHbc96Asm.OP_GET_ENVIRONMENT, 1, 0)
+            op(HermesHbc96Asm.OP_LOAD_CONST_UINT8, 3, 12)
+            op(HermesHbc96.OP_NEW_OBJECT, 3)
+            getById(4, 2, 2, sid("zoom"))
+            storeToEnvironment(0, 0, 4)
+            getById(9, 2, 3, sid("neutralZoom"))
+            storeToEnvironment(0, 1, 9)
+            getById(12, 2, 4, sid("minZoom"))
+            storeToEnvironment(0, 2, 12)
+            op(
+                HermesHbc96Asm.OP_GET_BY_ID,
+                10,
+                2,
+                5,
+                sid("backFacing") and 0xff,
+                (sid("backFacing") ushr 8) and 0xff,
+            )
+            getById(14, 1, 11, sid("useDeviceOrientationRotationStyle"))
+            getById(6, 1, 21, sid("CameraOverlayButton"))
+            op(HermesHbc96Asm.OP_LOAD_CONST_UINT8, 5, 3)
+            op(HermesHbc96Asm.OP_GET_BY_VAL, 5, 3, 5)
+            op(HermesHbc96Asm.OP_JMP, 20)
+            op(HermesHbc96Asm.OP_CREATE_CLOSURE, 0, 0, 3, 0) // func #3 = t1
+            op(HermesHbc96Asm.OP_LOAD_CONST_UINT8, 2, 3)
+            op(HermesHbc96Asm.OP_PUT_BY_VAL, 3, 2, 0)
+            op(HermesHbc96Asm.OP_MOV, 5, 0)
+            op(HermesHbc96.OP_RET, 5)
+        }.build()
+        val decodedBtn = HermesHbc96Asm.decodeFunction(buttonCode)
+        val jmpPos = decodedBtn.first { it.opcode == HermesHbc96Asm.OP_JMP }.offset
+        buttonCode[jmpPos + 1] = (decodedBtn.last().offset - jmpPos).toByte()
+        val homeCode = HermesHbc96Asm.Builder(0).apply {
+            op(HermesHbc96Asm.OP_LESS, 50, 59, 58)
+            loadConstString(1, sid("camera_theme"))
+            putNewOwnById(23, 83, sid("device"))
+            putNewOwnById(23, 79, sid("zoomProps"))
+            putNewOwnById(23, 55, sid("overlayZoomButtonProps"))
+            putNewOwnById(55, 59, sid("minZoom"))
+            putNewOwnById(55, 58, sid("neutralZoom"))
+            putNewOwnById(55, 56, sid("zoom"))
+            loadConstString(56, sid("back"))
+            op(HermesHbc96Asm.OP_STRICT_EQ, 56, 57, 56)
+            op(
+                HermesHbc96Asm.OP_PUT_NEW_OWN_BY_ID,
+                55,
+                56,
+                sid("backFacing") and 0xff,
+                (sid("backFacing") ushr 8) and 0xff,
+            )
+            op(HermesHbc96.OP_RET, 55)
+        }.build()
+
+        val bundle = buildSyntheticBundle(
+            strings = strings,
+            functions = listOf(
+                SyntheticFunction(nameId = sid("HomeCameraTsx3Factory"), code = factoryAsm, paramCount = 2, frameSize = 8, readCacheCount = 4),
+                SyntheticFunction(nameId = sid("HomeCameraTsx3"), code = tinyWorklet, paramCount = 2, frameSize = 8),
+                SyntheticFunction(nameId = sid("getNextZoomValue"), code = nextZoomCode, paramCount = 4, frameSize = 4),
+                SyntheticFunction(nameId = sid(""), code = t1Code, paramCount = 1, frameSize = 19),
+                SyntheticFunction(nameId = sid(""), code = buttonCode, paramCount = 2, frameSize = 24, environmentSize = 3, readCacheCount = 21),
+                SyntheticFunction(nameId = sid("Home"), code = homeCode, paramCount = 2, frameSize = 95, readCacheCount = 40),
+            ),
+            includeDebugTrailer = true,
+        )
+
+        val zoom = HermesHbc96.Mutation.ImprovePinchZoomWorklet("HomeCameraTsx3Factory", "HomeCameraTsx3")
+        val tele = HermesHbc96.Mutation.EnableTelephotoZoomToggle()
+        val fwd = HermesHbc96.patch(bundle, listOf(zoom, tele))
+        val rev = HermesHbc96.patch(bundle, listOf(tele, zoom))
+
+        for (res in listOf(fwd, rev)) {
+            assertValidSha1Footer(res.bytes)
+            assertEquals(res.bytes.size, readI32Le(res.bytes, 0x20))
+            val newDbgOff = readI32Le(res.bytes, 0x68)
+            assertEquals(0, newDbgOff and 3)
+            for (idx in 0..5) {
+                val hOff = HermesHbc96.HEADER_SIZE + idx * 16
+                val off = readI32Le(res.bytes, hOff) and 0x1ffffff
+                val sz = readI32Le(res.bytes, hOff + 4) and 0x7fff
+                assertTrue(off + sz <= newDbgOff)
+                assertTrue(HermesHbc96Asm.decodeFunction(res.bytes, off, off + sz).isNotEmpty())
+            }
+        }
+    }
+
     private fun assertValidSha1Footer(bytes: ByteArray) {
         val contentEnd = bytes.size - HermesHbc96.SHA1_SIZE
         val recomputedSha1 = MessageDigest.getInstance("SHA-1").apply {
@@ -308,12 +745,17 @@ class HermesHbc96Test {
         val nameId: Int,
         val code: ByteArray,
         val useLargeHeader: Boolean = false,
+        val paramCount: Int = 2,
+        val frameSize: Int = 16,
+        val environmentSize: Int = 0,
+        val readCacheCount: Int = 0,
     )
 
     private fun buildSyntheticBundle(
         version: Int = HermesHbc96.HBC_VERSION,
         strings: List<String>,
         functions: List<SyntheticFunction>,
+        includeDebugTrailer: Boolean = false,
     ): ByteArray {
         val storage = ByteArrayOutputStream()
         val smallStrings = ByteArray(strings.size * 4)
@@ -342,7 +784,8 @@ class HermesHbc96Test {
             cursor = align4(cursor + fn.code.size)
         }
 
-        val totalSize = cursor + HermesHbc96.SHA1_SIZE
+        val dbgOff = if (includeDebugTrailer) align4(cursor) else 0
+        val totalSize = (if (includeDebugTrailer) dbgOff + 28 else cursor) + HermesHbc96.SHA1_SIZE
         val out = ByteArray(totalSize)
 
         writeI64Le(out, 0x00, HermesHbc96.HBC_MAGIC)
@@ -351,6 +794,9 @@ class HermesHbc96Test {
         writeI32Le(out, 0x28, functions.size)
         writeI32Le(out, 0x34, strings.size)
         writeI32Le(out, 0x3c, storageBytes.size)
+        if (includeDebugTrailer) {
+            writeI32Le(out, 0x68, dbgOff)
+        }
 
         System.arraycopy(smallStrings, 0, out, smallStrOff, smallStrings.size)
         System.arraycopy(storageBytes, 0, out, storageOff, storageBytes.size)
@@ -358,10 +804,14 @@ class HermesHbc96Test {
         for ((idx, fn) in functions.withIndex()) {
             val hOff = HermesHbc96.HEADER_SIZE + idx * 16
             if (!fn.useLargeHeader) {
-                val w0 = codeOffsets[idx] and 0x1ffffff
+                val w0 = (codeOffsets[idx] and 0x1ffffff) or ((fn.paramCount and 0x7f) shl 25)
                 val w1 = (fn.code.size and 0x7fff) or ((fn.nameId and 0x1ffff) shl 15)
+                val w2 = (fn.frameSize and 0x7f) shl 25
+                val w3 = (fn.environmentSize and 0xff) or ((fn.readCacheCount and 0xff) shl 8) or (0x04 shl 24)
                 writeI32Le(out, hOff, w0)
                 writeI32Le(out, hOff + 4, w1)
+                writeI32Le(out, hOff + 8, w2)
+                writeI32Le(out, hOff + 12, w3)
             } else {
                 val lo = largeHeaderOffsets[idx]
                 val w0 = lo and 0xffff
@@ -385,6 +835,13 @@ class HermesHbc96Test {
     }
 
     private fun align4(v: Int): Int = (v + 3) and -4
+
+    private fun readI32Le(buf: ByteArray, offset: Int): Int {
+        return (buf[offset].toInt() and 0xff) or
+            ((buf[offset + 1].toInt() and 0xff) shl 8) or
+            ((buf[offset + 2].toInt() and 0xff) shl 16) or
+            ((buf[offset + 3].toInt() and 0xff) shl 24)
+    }
 
     private fun writeI32Le(buf: ByteArray, offset: Int, value: Int) {
         buf[offset] = (value and 0xff).toByte()

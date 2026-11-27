@@ -39,6 +39,8 @@ Technical notes, Hermes bytecode patching layout, and client/server scope live i
 - [Disable tracking and analytics](docs/disable-tracking.md)
 - [Hide upgrade and invite prompts](docs/hide-upgrade-prompts.md)
 - [Remove share watermarks](docs/remove-share-watermarks.md)
+- [Improve zoom gesture](docs/improve-zoom-gesture.md)
+- [Enable telephoto zoom toggle](docs/enable-telephoto-zoom-toggle.md)
 
 ## 🛠️ Building locally
 
