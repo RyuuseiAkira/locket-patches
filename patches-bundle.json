@@ -1,7 +1,7 @@
 {
-  "created_at": "",
-  "description": "",
-  "download_url": "",
+  "created_at": "2026-11-27T11:17:08",
+  "description": "## [1.0.0-dev.2](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.1...v1.0.0-dev.2) (2026-11-27)\n\n### 🐛 Bug Fixes\n\n* Align morphe-patches-library 2.3.1 and guava dependency ([92ca3a6](https://github.com/RyuuseiAkira/locket-patches/commit/92ca3a699fac87ba41a86ee50a6ac4219d44c687))",
+  "download_url": "https://github.com/RyuuseiAkira/locket-patches/releases/download/v1.0.0-dev.2/patches-1.0.0-dev.2.mpp",
   "signature_download_url": "",
-  "version": ""
+  "version": "1.0.0-dev.2"
 }
