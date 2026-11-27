@@ -31,9 +31,14 @@ Provide an unmodified APK / APKM (such as `com.locket.Locket` `1.247.1`).
 
 ## 📚 Documentation
 
-Technical notes, Hermes bytecode patching layout, and client/server scope live in [`docs/`](docs/unlock-gold.md):
+Technical notes, Hermes bytecode patching layout, and client/server scope live in [`docs/`](docs/):
 
 - [Unlock Gold & Hermes HBC v96 patching](docs/unlock-gold.md)
+- [Remove ads](docs/remove-ads.md)
+- [Bypass forced updates](docs/bypass-forced-updates.md)
+- [Disable tracking and analytics](docs/disable-tracking.md)
+- [Hide upgrade and invite prompts](docs/hide-upgrade-prompts.md)
+- [Remove share watermarks](docs/remove-share-watermarks.md)
 
 ## 🛠️ Building locally
 

@@ -11,7 +11,7 @@
 1. **Signature spoofing (`spoofSignaturePatch`):**
    Locket's Firebase Auth, Firebase Remote Config, and Play Services clients inspect `PackageManager.getPackageInfo` / `SigningInfo` to populate `X-Android-Package` and `X-Android-Cert`. Depending on `spoofSignaturePatch` preserves the original Play Store certificate hash so login and remote config requests continue working after re-signing.
 
-2. **Hermes HBC v96 bytecode override (`HermesBundlePatcher`):**
+2. **Hermes HBC v96 bytecode override (`HermesHbc96`):**
    - Verifies the `0x1f1903c103bc1fc6` HBC magic, version `96`, `fileLength`, and trailing 20-byte SHA-1 digest.
    - Resolves `"androidGoldSubscriptionOverride"`, `"getBoolean"`, and `"android_gold_subscription_override"` dynamically from the bundle string table (`SmallStringTableEntry` + `OverflowStringTableEntry`).
    - Locates `androidGoldSubscriptionOverride` via `SmallFuncHeader` / `LargeFuncHeader` and matches the contiguous sequence:

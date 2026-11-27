@@ -3,14 +3,21 @@
 
 package io.github.ryuuseiakira.locket.patches.locket.gold
 
-import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.patch
-import app.morphe.patcher.patch.resourceFile
 import app.morphe.patches.all.misc.fix.spoofsignature.spoofSignaturePatch
 import io.github.ryuuseiakira.locket.patches.shared.Constants.COMPATIBILITY_LOCKET
+import io.github.ryuuseiakira.locket.patches.shared.HermesHbc96
+import io.github.ryuuseiakira.locket.patches.shared.patchLocketBundle
 
-private const val BUNDLE_PATH = "assets/index.android.bundle"
-
+/**
+ * Enables client-side Locket Gold gates by rewriting `androidGoldSubscriptionOverride` to return
+ * `true` without querying Firebase Remote Config.
+ *
+ * Attachment: `assets/index.android.bundle` (`androidGoldSubscriptionOverride` helper).
+ * Mechanism: In-place 5-byte HBC v96 `Call2 -> LoadConstTrue; Ret; Unreachable` rewrite plus
+ * `spoofSignaturePatch` so Firebase Auth, Remote Config, and App Check accept re-signed APKs.
+ * Constraint: Server-side entitlement validation and Play billing receipts remain server-enforced.
+ */
 @Suppress("unused")
 val unlockGoldPatch = patch(
     name = "Unlock Gold",
@@ -22,17 +29,13 @@ val unlockGoldPatch = patch(
     dependsOn(spoofSignaturePatch)
 
     execute {
-        val bundleFile = resourceFile(BUNDLE_PATH, copy = true)
-        if (!bundleFile.isFile) {
-            throw PatchException("Target APK does not contain $BUNDLE_PATH.")
-        }
-
-        val patched = try {
-            HermesBundlePatcher.patch(bundleFile.readBytes())
-        } catch (ex: IllegalArgumentException) {
-            throw PatchException(ex.message ?: "Failed to patch $BUNDLE_PATH.", ex)
-        }
-
-        bundleFile.writeBytes(patched.bytes)
+        patchLocketBundle(
+            HermesHbc96.Mutation.RemoteConfigReturnConst(
+                functionName = "androidGoldSubscriptionOverride",
+                getterMethodName = "getBoolean",
+                configKey = "android_gold_subscription_override",
+                returnOpcode = HermesHbc96.OP_LOAD_CONST_TRUE,
+            ),
+        )
     }
 }
