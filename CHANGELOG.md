@@ -1,3 +1,9 @@
+## [1.0.0-dev.5](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.4...v1.0.0-dev.5) (2026-11-27)
+
+### 🐛 Bug Fixes
+
+* Reserve outgoing Hermes call frame slots across camera patches ([fba4c49](https://github.com/RyuuseiAkira/locket-patches/commit/fba4c4916e2d9b4b02cf97f78c28018fe625c687))
+
 ## [1.0.0-dev.4](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.3...v1.0.0-dev.4) (2026-11-27)
 
 ### ✨ New Features
