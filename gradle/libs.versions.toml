@@ -1,9 +1,10 @@
 [versions]
 morphe-patcher = "2.6.0"
-morphe-patches-library = "2.3.0"
+morphe-patches-library = "2.3.1"
 #noinspection GradleDependency
 smali = "5a5249e22f"
 gson = "2.15.0"
+guava = "33.6.0-jre"
 animalsniffer = "2.0.1"
 gummy-bears = "0.16.0"
 junit-jupiter = "5.11.4"
@@ -11,6 +12,7 @@ junit-platform = "1.11.4"
 
 [libraries]
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
 android-api-signature = { module = "com.toasttab.android:gummy-bears-api-26", version.ref = "gummy-bears" }
 morphe-patches-library = { module = "app.morphe:morphe-patches-library", version.ref = "morphe-patches-library" }
 junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junit-jupiter" }

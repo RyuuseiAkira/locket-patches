@@ -30,7 +30,15 @@ patches {
 // generatePatchesList task but never bundled into the APK.
 val patchListGeneratorClasspath = configurations.create("patchListGeneratorClasspath")
 
+// Resolve classpath artifacts as JARs consistently across compile and runtime classpaths.
+configurations.compileClasspath {
+    attributes {
+        attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE, objects.named(LibraryElements.JAR))
+    }
+}
+
 dependencies {
+    implementation(libs.guava)
     implementation(libs.morphe.patches.library)
 
     compileOnly(libs.gson)
