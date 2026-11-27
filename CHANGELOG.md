@@ -1,3 +1,13 @@
+## [1.0.0-dev.4](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.3...v1.0.0-dev.4) (2026-11-27)
+
+### ✨ New Features
+
+* Add zoom gesture smoothness and telephoto zoom toggle patches ([b1ec15e](https://github.com/RyuuseiAkira/locket-patches/commit/b1ec15e027d5e55402eb59bf6c9af9f73e74287b))
+
+### 🐛 Bug Fixes
+
+* Resolve relocated functions when scanning HBC batches ([c28bd9e](https://github.com/RyuuseiAkira/locket-patches/commit/c28bd9e847a7d37ae2ad490e136d472068409513))
+
 ## [1.0.0-dev.3](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0-dev.2...v1.0.0-dev.3) (2026-11-27)
 
 ### ✨ New Features
