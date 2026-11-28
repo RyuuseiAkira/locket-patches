@@ -28,3 +28,11 @@ updates:
     target-branch: dev
     schedule:
       interval: monthly
+    ignore:
+      # JUnit 6 requires JVM 17+, while patches compiles and runs tests against JVM 11
+      - dependency-name: "org.junit.jupiter:junit-jupiter-engine"
+        versions:
+          - ">= 6.0.0"
+      - dependency-name: "org.junit.platform:junit-platform-launcher"
+        versions:
+          - ">= 6.0.0"
