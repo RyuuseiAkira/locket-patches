@@ -1,3 +1,14 @@
+## [1.1.0-dev.1](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0...v1.1.0-dev.1) (2026-11-28)
+
+### ✨ New Features
+
+* Add GmsCore (MicroG-RE) support and default back camera patches ([b80b507](https://github.com/RyuuseiAkira/locket-patches/commit/b80b507c968f56e8938608c42fd28d1dd450b106))
+
+### 🐛 Bug Fixes
+
+* Downgrade JUnit to 5.11.4 / 1.11.4 for JVM 11 compatibility ([6ab04db](https://github.com/RyuuseiAkira/locket-patches/commit/6ab04db27bc8152b984e183829706f02beb4ce53))
+* Pin semantic-release to ^25.0.9 for gradle plugin compatibility ([28f2f72](https://github.com/RyuuseiAkira/locket-patches/commit/28f2f72c1f83a26673692a9bc132dda2a5a8d28d))
+
 ## 1.0.0 (2026-11-27)
 
 ### ✨ New Features

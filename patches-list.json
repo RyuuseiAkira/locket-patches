@@ -1,6 +1,6 @@
 {
   "NOTE": "Do NOT manually edit this file. This file is automatically updated when semantic release (release.yml) runs. Manually editing this file can break your releases and break third party tools that use this file.",
-  "version": "1.0.0",
+  "version": "1.1.0-dev.1",
   "patches": [
     {
       "name": "Bypass forced updates",
@@ -37,8 +37,76 @@
       "options": []
     },
     {
+      "name": "Default back camera",
+      "description": "Starts the main camera on the back lens instead of the front selfie camera.",
+      "default": false,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
       "name": "Disable tracking and analytics",
       "description": "Disables AppsFlyer, Amplitude, Sentry tracing, Firebase Analytics logging, and native camera debug telemetry.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "GmsCore support",
+      "description": "Enables Google Sign-In and Play Services features without root using MicroG-RE (app.revanced.android.gms).",
       "default": true,
       "category": null,
       "compatiblePackages": [
