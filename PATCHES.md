@@ -1,6 +1,6 @@
 # Patches
 
-> Generated from `patches-list.json` — **v1.1.0-dev.1** (`dev`) · **8 patches** across **1 app** · back to [README](README.md)
+> Generated from `patches-list.json` — **v1.1.0-dev.2** (`dev`) · **9 patches** across **1 app** · back to [README](README.md)
 
 ---
 
@@ -18,5 +18,6 @@
 | **Remove ads** | Disables history feed ads, ad reporting, and client-side ad eligibility gates. |
 | **Remove share watermarks** | Strips Locket overlay watermarks from shared History and Moment images while preserving normal saving and scaling. |
 | **Unlock Gold** | Unlocks client-side Locket Gold features by overriding the remote config subscription check. |
+| **Upload videos from camera roll** | Allows selecting and uploading videos from the device gallery alongside photos. |
 
 ---

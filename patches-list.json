@@ -1,6 +1,6 @@
 {
   "NOTE": "Do NOT manually edit this file. This file is automatically updated when semantic release (release.yml) runs. Manually editing this file can break your releases and break third party tools that use this file.",
-  "version": "1.1.0-dev.1",
+  "version": "1.1.0-dev.2",
   "patches": [
     {
       "name": "Bypass forced updates",
@@ -243,6 +243,40 @@
     {
       "name": "Unlock Gold",
       "description": "Unlocks client-side Locket Gold features by overriding the remote config subscription check.",
+      "default": true,
+      "category": null,
+      "compatiblePackages": [
+        {
+          "packageName": "com.locket.Locket",
+          "name": "Locket Widget",
+          "description": "Share live photos from your best friends right to your home screen.",
+          "apkFileType": "APKM",
+          "appIconColor": "#FFB000",
+          "signatures": null,
+          "formFactor": "MOBILE",
+          "targets": [
+            {
+              "version": "1.247.1",
+              "versionCodes": null,
+              "isExperimental": false,
+              "minSdk": null,
+              "description": null
+            },
+            {
+              "version": null,
+              "versionCodes": null,
+              "isExperimental": true,
+              "minSdk": null,
+              "description": null
+            }
+          ]
+        }
+      ],
+      "options": []
+    },
+    {
+      "name": "Upload videos from camera roll",
+      "description": "Allows selecting and uploading videos from the device gallery alongside photos.",
       "default": true,
       "category": null,
       "compatiblePackages": [

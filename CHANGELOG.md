@@ -1,3 +1,9 @@
+## [1.1.0-dev.2](https://github.com/RyuuseiAkira/locket-patches/compare/v1.1.0-dev.1...v1.1.0-dev.2) (2026-11-28)
+
+### ✨ New Features
+
+* Add camera-roll video upload patch ([2af3143](https://github.com/RyuuseiAkira/locket-patches/commit/2af314330cec1740dd0f6446622d7eae164ef54b))
+
 ## [1.1.0-dev.1](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0...v1.1.0-dev.1) (2026-11-28)
 
 ### ✨ New Features
