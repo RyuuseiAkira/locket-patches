@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-11-28T01:30:08",
-  "description": "## [1.1.0-dev.1](https://github.com/RyuuseiAkira/locket-patches/compare/v1.0.0...v1.1.0-dev.1) (2026-11-28)\n\n### ✨ New Features\n\n* Add GmsCore (MicroG-RE) support and default back camera patches ([b80b507](https://github.com/RyuuseiAkira/locket-patches/commit/b80b507c968f56e8938608c42fd28d1dd450b106))\n\n### 🐛 Bug Fixes\n\n* Downgrade JUnit to 5.11.4 / 1.11.4 for JVM 11 compatibility ([6ab04db](https://github.com/RyuuseiAkira/locket-patches/commit/6ab04db27bc8152b984e183829706f02beb4ce53))\n* Pin semantic-release to ^25.0.9 for gradle plugin compatibility ([28f2f72](https://github.com/RyuuseiAkira/locket-patches/commit/28f2f72c1f83a26673692a9bc132dda2a5a8d28d))",
-  "download_url": "https://github.com/RyuuseiAkira/locket-patches/releases/download/v1.1.0-dev.1/patches-1.1.0-dev.1.mpp",
+  "created_at": "2026-11-28T07:09:51",
+  "description": "## [1.1.0-dev.2](https://github.com/RyuuseiAkira/locket-patches/compare/v1.1.0-dev.1...v1.1.0-dev.2) (2026-11-28)\n\n### ✨ New Features\n\n* Add camera-roll video upload patch ([2af3143](https://github.com/RyuuseiAkira/locket-patches/commit/2af314330cec1740dd0f6446622d7eae164ef54b))",
+  "download_url": "https://github.com/RyuuseiAkira/locket-patches/releases/download/v1.1.0-dev.2/patches-1.1.0-dev.2.mpp",
   "signature_download_url": "",
-  "version": "1.1.0-dev.1"
+  "version": "1.1.0-dev.2"
 }
