@@ -150,6 +150,22 @@ object HermesHbc96 {
             override val label: String
                 get() = "GeneratorEarlyReturn($functionName:$requiredStrings)"
         }
+
+        /**
+         * Rewrites the constant string argument passed to a `Call2` of `[calleeName]` inside the
+         * unique synchronous function named [functionName] containing all [requiredStrings], from
+         * [fromValue] to [toValue], without mutating shared string table bytes.
+         */
+        data class ReplaceCallStringConst(
+            val functionName: String,
+            val calleeName: String,
+            val fromValue: String,
+            val toValue: String,
+            val requiredStrings: List<String> = emptyList(),
+        ) : Mutation {
+            override val label: String
+                get() = "ReplaceCallStringConst($functionName:$calleeName:$fromValue->$toValue)"
+        }
     }
 
     data class AppliedSite(
@@ -246,6 +262,7 @@ object HermesHbc96 {
                     is Mutation.RemoteConfigReturnConst -> add(stringIds.getValue(mutation.functionName))
                     is Mutation.FunctionEarlyReturn -> add(stringIds.getValue(mutation.functionName))
                     is Mutation.GeneratorEarlyReturn -> add(stringIds.getValue(mutation.functionName))
+                    is Mutation.ReplaceCallStringConst -> add(stringIds.getValue(mutation.functionName))
                 }
             }
         }
@@ -269,6 +286,12 @@ object HermesHbc96 {
                     mutation = mutation,
                 )
                 is Mutation.GeneratorEarlyReturn -> applyGeneratorEarlyReturn(
+                    bundle = output,
+                    stringIds = stringIds,
+                    functionsByName = functionsByName,
+                    mutation = mutation,
+                )
+                is Mutation.ReplaceCallStringConst -> applyReplaceCallStringConst(
                     bundle = output,
                     stringIds = stringIds,
                     functionsByName = functionsByName,
@@ -303,6 +326,13 @@ object HermesHbc96 {
                 }
                 is Mutation.GeneratorEarlyReturn -> {
                     out.add(mutation.functionName)
+                    out.addAll(mutation.requiredStrings)
+                }
+                is Mutation.ReplaceCallStringConst -> {
+                    out.add(mutation.functionName)
+                    out.add(mutation.calleeName)
+                    out.add(mutation.fromValue)
+                    out.add(mutation.toValue)
                     out.addAll(mutation.requiredStrings)
                 }
             }
@@ -583,6 +613,117 @@ object HermesHbc96 {
         )
     }
 
+    private fun applyReplaceCallStringConst(
+        bundle: ByteArray,
+        stringIds: Map<String, Int>,
+        functionsByName: Map<Int, List<FunctionMeta>>,
+        mutation: Mutation.ReplaceCallStringConst,
+    ): AppliedSite {
+        require(mutation.fromValue != mutation.toValue) {
+            "Replacement string for ${mutation.label} must differ from source string."
+        }
+        val fnNameId = stringIds.getValue(mutation.functionName)
+        val calleeId = stringIds.getValue(mutation.calleeName)
+        val fromId = stringIds.getValue(mutation.fromValue)
+        val toId = stringIds.getValue(mutation.toValue)
+        val reqIds = mutation.requiredStrings.map(stringIds::getValue)
+
+        val candidates = functionsByName.getValue(fnNameId).filter { fn ->
+            fn.codeSize >= MIN_CALL_STRING_ARG_LEN &&
+                bundle[fn.codeOffset] != OP_START_GENERATOR &&
+                containsAllStringRefs(bundle, fn.codeOffset, fn.codeSize, reqIds)
+        }
+        require(candidates.size == 1) {
+            "Expected 1 synchronous match for ${mutation.label}, found ${candidates.size}."
+        }
+        val fn = candidates[0]
+
+        var matchedOperandOffset = -1
+        var matchedOperandWidth = 0
+        var matchedArgReg = -1
+        var matchCount = 0
+
+        val codeEnd = fn.codeOffset + fn.codeSize
+        var offset = fn.codeOffset
+        while (offset < codeEnd) {
+            val insLen = stepInstruction(bundle, offset, codeEnd)
+
+            // Indirect calls like `(0, _react.useState)('front')` pass `undefined` as Call2's `this`
+            // register (`bundle[callOff + 3]`), so validate `func == rFn` and `arg == rArg`.
+            // Pattern A: GetById*(rFn, rObj, callee) -> LoadConstString*(rArg, from) -> Call2(rDst, rFn, rThis, rArg)
+            val getLenA = matchGetById(bundle, offset, codeEnd, calleeId)
+            if (getLenA > 0) {
+                val rFn = bundle[offset + 1]
+                val strOff = offset + getLenA
+                val strLen = matchLoadConstString(bundle, strOff, codeEnd, fromId)
+                if (strLen > 0) {
+                    val rArg = bundle[strOff + 1]
+                    val callOff = strOff + strLen
+                    if (rArg != rFn &&
+                        callOff + 5 <= codeEnd &&
+                        bundle[callOff] == OP_CALL2 &&
+                        bundle[callOff + 2] == rFn &&
+                        bundle[callOff + 4] == rArg
+                    ) {
+                        matchCount++
+                        matchedOperandOffset = strOff + 2
+                        matchedOperandWidth = if (bundle[strOff] == OP_LOAD_CONST_STRING_LONG_INDEX) 4 else 2
+                        matchedArgReg = rArg.toInt() and 0xff
+                        offset = callOff + 5
+                        continue
+                    }
+                }
+            }
+
+            // Pattern B: LoadConstString*(rArg, from) -> GetById*(rFn, rObj, callee) -> Call2(rDst, rFn, rThis, rArg)
+            val strLenB = matchLoadConstString(bundle, offset, codeEnd, fromId)
+            if (strLenB > 0) {
+                val rArg = bundle[offset + 1]
+                val getOff = offset + strLenB
+                val getLenB = matchGetById(bundle, getOff, codeEnd, calleeId)
+                if (getLenB > 0) {
+                    val rFn = bundle[getOff + 1]
+                    val callOff = getOff + getLenB
+                    if (rArg != rFn &&
+                        callOff + 5 <= codeEnd &&
+                        bundle[callOff] == OP_CALL2 &&
+                        bundle[callOff + 2] == rFn &&
+                        bundle[callOff + 4] == rArg
+                    ) {
+                        matchCount++
+                        matchedOperandOffset = offset + 2
+                        matchedOperandWidth = if (bundle[offset] == OP_LOAD_CONST_STRING_LONG_INDEX) 4 else 2
+                        matchedArgReg = rArg.toInt() and 0xff
+                        offset = callOff + 5
+                        continue
+                    }
+                }
+            }
+
+            offset += insLen
+        }
+
+        require(matchCount == 1) {
+            "Expected 1 patchable Call2 site in ${mutation.label}, found $matchCount."
+        }
+        if (matchedOperandWidth == 2) {
+            require(toId in 0..0xffff) {
+                "String ID $toId for '${mutation.toValue}' exceeds 16-bit LoadConstString range."
+            }
+            writeU16Le(bundle, matchedOperandOffset, toId)
+        } else {
+            writeU32Le(bundle, matchedOperandOffset, toId.toLong())
+        }
+
+        return AppliedSite(
+            label = mutation.label,
+            functionIndex = fn.index,
+            patchOffset = matchedOperandOffset,
+            byteCount = matchedOperandWidth,
+            register = matchedArgReg,
+        )
+    }
+
     private fun generatorPostResumeOffset(bundle: ByteArray, fn: FunctionMeta): Int {
         val s = fn.codeOffset
         if (fn.codeSize < 12) return -1
@@ -722,6 +863,20 @@ object HermesHbc96 {
             result = result or ((bytes[offset + i].toLong() and 0xffL) shl (i * 8))
         }
         return result
+    }
+
+    private const val MIN_CALL_STRING_ARG_LEN = 14
+
+    private fun writeU16Le(bytes: ByteArray, offset: Int, value: Int) {
+        bytes[offset] = (value and 0xff).toByte()
+        bytes[offset + 1] = ((value ushr 8) and 0xff).toByte()
+    }
+
+    private fun writeU32Le(bytes: ByteArray, offset: Int, value: Long) {
+        bytes[offset] = (value and 0xffL).toByte()
+        bytes[offset + 1] = ((value ushr 8) and 0xffL).toByte()
+        bytes[offset + 2] = ((value ushr 16) and 0xffL).toByte()
+        bytes[offset + 3] = ((value ushr 24) and 0xffL).toByte()
     }
 
     private fun sha1(bytes: ByteArray, length: Int): ByteArray {
