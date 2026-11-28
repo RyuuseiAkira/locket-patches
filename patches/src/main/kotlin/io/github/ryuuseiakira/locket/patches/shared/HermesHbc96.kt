@@ -6,17 +6,18 @@ package io.github.ryuuseiakira.locket.patches.shared
 import java.security.MessageDigest
 
 /**
- * Shared pure-Kotlin Hermes bytecode (HBC v96) parser, verifier, and fixed-length patcher for
+ * Shared pure-Kotlin Hermes bytecode (HBC v96) parser, verifier, and patcher for
  * `assets/index.android.bundle`.
  *
  * Attachment: Hermes HBC v96 buffer (`assets/index.android.bundle`) parsed by header, function
  * table, string table, and trailing SHA-1 integrity footer.
  * Mechanism: Validates magic, version 96, exact `fileLength`, and trailing SHA-1 digest, maps
  * needed string table indices and function headers (`SmallFuncHeader` and `LargeFuncHeader`),
- * applies instruction-aligned length-preserving in-place bytecode rewrites, and recomputes the
- * trailing SHA-1 footer.
- * Constraint: Fixed-length in-place writes preserve all function/table offsets; every rewrite rule
- * must resolve a single unambiguous site and pass bounds and prologue/sequence verification.
+ * applies length-preserving in-place rewrites or EOF-appended function relocations with header
+ * `fileLength` / `SmallFuncHeader` updates, and recomputes the trailing SHA-1 footer.
+ * Constraint: In-place writes preserve all offsets; relocated functions must have no exception
+ * handlers or debug info, remain within `SmallFuncHeader` bounds, and pass unambiguous structural
+ * and register-frame verification.
  */
 object HermesHbc96 {
     const val BUNDLE_PATH: String = "assets/index.android.bundle"
@@ -28,6 +29,10 @@ object HermesHbc96 {
 
     const val OP_UNREACHABLE: Byte = 0x00
     const val OP_NEW_OBJECT: Byte = 0x03
+    const val OP_MOV: Byte = 0x08
+    const val OP_GET_ENVIRONMENT: Byte = 0x29
+    const val OP_LOAD_FROM_ENVIRONMENT: Byte = 0x2e
+    const val OP_CREATE_ENVIRONMENT: Byte = 0x32
     const val OP_GET_BY_ID_SHORT: Byte = 0x36
     const val OP_GET_BY_ID: Byte = 0x37
     const val OP_GET_BY_ID_LONG: Byte = 0x38
@@ -42,8 +47,16 @@ object HermesHbc96 {
     const val OP_PUT_NEW_OWN_BY_ID_LONG: Byte = 0x41
     const val OP_PUT_NEW_OWN_NE_BY_ID: Byte = 0x42
     const val OP_PUT_NEW_OWN_NE_BY_ID_LONG: Byte = 0x43
+    const val OP_CALL1: Byte = 0x51
     const val OP_CALL2: Byte = 0x53
+    const val OP_CALL3: Byte = 0x54
     const val OP_RET: Byte = 0x5c
+    const val OP_CREATE_CLOSURE: Byte = 0x64
+    const val OP_CREATE_CLOSURE_LONG_INDEX: Byte = 0x65
+    const val OP_CREATE_GENERATOR_CLOSURE: Byte = 0x66
+    const val OP_CREATE_GENERATOR_CLOSURE_LONG_INDEX: Byte = 0x67
+    const val OP_LOAD_PARAM: Byte = 0x6c
+    const val OP_LOAD_CONST_INT: Byte = 0x6f
     const val OP_LOAD_CONST_STRING: Byte = 0x73
     const val OP_LOAD_CONST_STRING_LONG_INDEX: Byte = 0x74
     const val OP_LOAD_CONST_UNDEFINED: Byte = 0x76
@@ -54,12 +67,31 @@ object HermesHbc96 {
     const val OP_START_GENERATOR: Byte = 0x86.toByte()
     const val OP_RESUME_GENERATOR: Byte = 0x87.toByte()
     const val OP_COMPLETE_GENERATOR: Byte = 0x88.toByte()
+    const val OP_CREATE_GENERATOR: Byte = 0x89.toByte()
+    const val OP_CREATE_GENERATOR_LONG_INDEX: Byte = 0x8a.toByte()
+    const val OP_JMP: Byte = 0x8e.toByte()
+    const val OP_JMP_LONG: Byte = 0x8f.toByte()
     const val OP_JMP_TRUE: Byte = 0x90.toByte()
     const val OP_JMP_TRUE_LONG: Byte = 0x91.toByte()
+    const val OP_JGREATER: Byte = 0xa8.toByte()
+    const val OP_JGREATER_LONG: Byte = 0xa9.toByte()
+    const val OP_JEQUAL: Byte = 0xb8.toByte()
+    const val OP_JEQUAL_LONG: Byte = 0xb9.toByte()
+    const val OP_JSTRICT_NOT_EQUAL: Byte = 0xbe.toByte()
+    const val OP_JSTRICT_NOT_EQUAL_LONG: Byte = 0xbf.toByte()
 
     private const val SMALL_FUNC_HEADER_SIZE: Int = 16
     private const val LARGE_FUNC_HEADER_SIZE: Int = 32
     private const val OVERFLOW_STRING_ENTRY_SIZE: Int = 8
+    private const val FLAG_HAS_EXCEPTION_HANDLER: Int = 0x08
+    private const val FLAG_HAS_DEBUG_INFO: Int = 0x10
+    private const val FLAG_OVERFLOWED: Int = 0x20
+    private const val MAX_SMALL_OFFSET: Int = 0x1ffffff
+    private const val MAX_SMALL_BYTECODE_SIZE: Int = 0x7fff
+    private const val MAX_SMALL_FRAME_SIZE: Int = 0x7f
+    private const val CALLER_OUTGOING_REGS_RESERVE: Int = 8 // StackFrameLayout: 6 header + this + arg0..
+    private const val ORIGINAL_PICKER_MAX_FILE_BYTES: Int = 104_857_600 // 100 MiB in openCameraRoll
+    const val DEFAULT_VIDEO_PICKER_MAX_FILE_BYTES: Int = 536_870_912 // 512 MiB pre-transcode ceiling
 
     private const val OFF_MAGIC: Int = 0x00
     private const val OFF_VERSION: Int = 0x08
@@ -166,6 +198,25 @@ object HermesHbc96 {
             override val label: String
                 get() = "ReplaceCallStringConst($functionName:$calleeName:$fromValue->$toValue)"
         }
+
+        /**
+         * Enables camera-roll video selection (`MediaTypeOptions.All`), raises the pre-transcode
+         * file-size ceiling to [maxFileSizeBytes], tags `fileType: asset.type` in `openCameraRoll`,
+         * and routes picked videos into `Home`'s `onRecordingFinished` pipeline via a relocated
+         * `onSuccess` closure body.
+         */
+        data class EnableCameraRollVideoUpload(
+            val maxFileSizeBytes: Int = DEFAULT_VIDEO_PICKER_MAX_FILE_BYTES,
+        ) : Mutation {
+            init {
+                require(maxFileSizeBytes > 0) {
+                    "maxFileSizeBytes must be positive (got $maxFileSizeBytes)."
+                }
+            }
+
+            override val label: String
+                get() = "EnableCameraRollVideoUpload($maxFileSizeBytes)"
+        }
     }
 
     data class AppliedSite(
@@ -186,6 +237,14 @@ object HermesHbc96 {
         val nameId: Int,
         val codeOffset: Int,
         val codeSize: Int,
+        val paramCount: Int,
+        val infoOffset: Int,
+        val frameSize: Int,
+        val environmentSize: Int,
+        val highestReadCacheIndex: Int,
+        val highestWriteCacheIndex: Int,
+        val flags: Int,
+        val overflowed: Boolean,
     )
 
     private data class TargetPattern(
@@ -263,46 +322,72 @@ object HermesHbc96 {
                     is Mutation.FunctionEarlyReturn -> add(stringIds.getValue(mutation.functionName))
                     is Mutation.GeneratorEarlyReturn -> add(stringIds.getValue(mutation.functionName))
                     is Mutation.ReplaceCallStringConst -> add(stringIds.getValue(mutation.functionName))
+                    is Mutation.EnableCameraRollVideoUpload -> {
+                        add(stringIds.getValue(""))
+                        add(stringIds.getValue("?anon_0_"))
+                        add(stringIds.getValue("Home"))
+                    }
                 }
             }
         }
         val functionsByName = resolveWantedFunctions(bundle, functionCount, contentEnd, wantedNameIds)
 
-        val output = bundle.copyOf()
+        var output = bundle.copyOf()
+        var currentContentEnd = contentEnd
         val appliedSites = ArrayList<AppliedSite>(mutations.size)
 
         for (mutation in mutations) {
-            val site = when (mutation) {
-                is Mutation.RemoteConfigReturnConst -> applyRemoteConfigReturnConst(
-                    bundle = output,
-                    stringIds = stringIds,
-                    functionsByName = functionsByName,
-                    mutation = mutation,
+            when (mutation) {
+                is Mutation.RemoteConfigReturnConst -> appliedSites.add(
+                    applyRemoteConfigReturnConst(
+                        bundle = output,
+                        stringIds = stringIds,
+                        functionsByName = functionsByName,
+                        mutation = mutation,
+                    ),
                 )
-                is Mutation.FunctionEarlyReturn -> applyFunctionEarlyReturn(
-                    bundle = output,
-                    stringIds = stringIds,
-                    functionsByName = functionsByName,
-                    mutation = mutation,
+                is Mutation.FunctionEarlyReturn -> appliedSites.add(
+                    applyFunctionEarlyReturn(
+                        bundle = output,
+                        stringIds = stringIds,
+                        functionsByName = functionsByName,
+                        mutation = mutation,
+                    ),
                 )
-                is Mutation.GeneratorEarlyReturn -> applyGeneratorEarlyReturn(
-                    bundle = output,
-                    stringIds = stringIds,
-                    functionsByName = functionsByName,
-                    mutation = mutation,
+                is Mutation.GeneratorEarlyReturn -> appliedSites.add(
+                    applyGeneratorEarlyReturn(
+                        bundle = output,
+                        stringIds = stringIds,
+                        functionsByName = functionsByName,
+                        mutation = mutation,
+                    ),
                 )
-                is Mutation.ReplaceCallStringConst -> applyReplaceCallStringConst(
-                    bundle = output,
-                    stringIds = stringIds,
-                    functionsByName = functionsByName,
-                    mutation = mutation,
+                is Mutation.ReplaceCallStringConst -> appliedSites.add(
+                    applyReplaceCallStringConst(
+                        bundle = output,
+                        stringIds = stringIds,
+                        functionsByName = functionsByName,
+                        mutation = mutation,
+                    ),
                 )
+                is Mutation.EnableCameraRollVideoUpload -> {
+                    val result = applyEnableCameraRollVideoUpload(
+                        bundle = output,
+                        contentEnd = currentContentEnd,
+                        functionCount = functionCount,
+                        stringIds = stringIds,
+                        functionsByName = functionsByName,
+                        mutation = mutation,
+                    )
+                    output = result.bytes
+                    currentContentEnd = result.contentEnd
+                    appliedSites.addAll(result.sites)
+                }
             }
-            appliedSites.add(site)
         }
 
-        val newDigest = sha1(output, contentEnd)
-        System.arraycopy(newDigest, 0, output, contentEnd, SHA1_SIZE)
+        val newDigest = sha1(output, currentContentEnd)
+        System.arraycopy(newDigest, 0, output, currentContentEnd, SHA1_SIZE)
 
         return BatchPatchResult(bytes = output, appliedSites = appliedSites)
     }
@@ -334,6 +419,9 @@ object HermesHbc96 {
                     out.add(mutation.fromValue)
                     out.add(mutation.toValue)
                     out.addAll(mutation.requiredStrings)
+                }
+                is Mutation.EnableCameraRollVideoUpload -> {
+                    out.addAll(VIDEO_UPLOAD_REQUIRED_STRINGS)
                 }
             }
         }
@@ -415,52 +503,101 @@ object HermesHbc96 {
 
         for (funcIdx in 0 until functionCount) {
             val hOff = HEADER_SIZE + funcIdx * SMALL_FUNC_HEADER_SIZE
-            val w0 = i32Le(bundle, hOff)
             val w1 = i32Le(bundle, hOff + 4)
-            val w2 = i32Le(bundle, hOff + 8)
             val w3 = i32Le(bundle, hOff + 12)
-            val overflowed = (((w3 ushr 24) and 0xff) ushr 5 and 1) != 0
+            val overflowed = (((w3 ushr 24) and 0xff) and FLAG_OVERFLOWED) != 0
 
-            val codeOffset: Int
-            val codeSize: Int
-            val nameIdx: Int
-
-            if (!overflowed) {
-                nameIdx = (w1 ushr 15) and 0x1ffff
-                if (nameIdx !in grouped) continue
-                codeOffset = w0 and 0x1ffffff
-                codeSize = w1 and 0x7fff
-                require(codeOffset >= HEADER_SIZE && codeOffset + codeSize <= contentEnd) {
-                    "Bytecode range ($codeOffset + $codeSize) for function #$funcIdx out of bounds."
-                }
+            val nameIdx = if (!overflowed) {
+                (w1 ushr 15) and 0x1ffff
             } else {
+                val w0 = i32Le(bundle, hOff)
+                val w2 = i32Le(bundle, hOff + 8)
                 val largeOffset = (((w2 and 0xffff).toLong() shl 16) or (w0 and 0xffff).toLong())
                 require(largeOffset >= HEADER_SIZE && largeOffset + LARGE_FUNC_HEADER_SIZE <= contentEnd) {
                     "LargeFuncHeader offset $largeOffset for function #$funcIdx out of bounds."
                 }
-                val lo = largeOffset.toInt()
-                val largeName = u32Le(bundle, lo + 12)
+                val largeName = u32Le(bundle, largeOffset.toInt() + 12)
                 if (largeName > Int.MAX_VALUE) continue
-                nameIdx = largeName.toInt()
-                if (nameIdx !in grouped) continue
-                val rawOffset = u32Le(bundle, lo)
-                val rawSize = u32Le(bundle, lo + 8)
-                require(
-                    rawOffset <= Int.MAX_VALUE &&
-                        rawSize <= Int.MAX_VALUE &&
-                        rawOffset >= HEADER_SIZE &&
-                        rawOffset + rawSize <= contentEnd
-                ) {
-                    "LargeFuncHeader range ($rawOffset + $rawSize) for function #$funcIdx out of bounds."
-                }
-                codeOffset = rawOffset.toInt()
-                codeSize = rawSize.toInt()
+                largeName.toInt()
             }
-
-            grouped.getValue(nameIdx).add(FunctionMeta(funcIdx, nameIdx, codeOffset, codeSize))
+            if (nameIdx !in grouped) continue
+            grouped.getValue(nameIdx).add(readFunctionMeta(bundle, funcIdx, contentEnd))
         }
 
         return grouped
+    }
+
+    private fun readFunctionMeta(
+        bundle: ByteArray,
+        funcIdx: Int,
+        contentEnd: Int,
+    ): FunctionMeta {
+        val hOff = HEADER_SIZE + funcIdx * SMALL_FUNC_HEADER_SIZE
+        val w0 = i32Le(bundle, hOff)
+        val w1 = i32Le(bundle, hOff + 4)
+        val w2 = i32Le(bundle, hOff + 8)
+        val w3 = i32Le(bundle, hOff + 12)
+        val flags = (w3 ushr 24) and 0xff
+        val overflowed = (flags and FLAG_OVERFLOWED) != 0
+
+        if (!overflowed) {
+            val codeOffset = w0 and 0x1ffffff
+            val codeSize = w1 and 0x7fff
+            require(codeOffset >= HEADER_SIZE && codeOffset + codeSize <= contentEnd) {
+                "Bytecode range ($codeOffset + $codeSize) for function #$funcIdx out of bounds."
+            }
+            return FunctionMeta(
+                index = funcIdx,
+                nameId = (w1 ushr 15) and 0x1ffff,
+                codeOffset = codeOffset,
+                codeSize = codeSize,
+                paramCount = (w0 ushr 25) and 0x7f,
+                infoOffset = w2 and 0x1ffffff,
+                frameSize = (w2 ushr 25) and 0x7f,
+                environmentSize = w3 and 0xff,
+                highestReadCacheIndex = (w3 ushr 8) and 0xff,
+                highestWriteCacheIndex = (w3 ushr 16) and 0xff,
+                flags = flags,
+                overflowed = false,
+            )
+        }
+
+        val largeOffset = (((w2 and 0xffff).toLong() shl 16) or (w0 and 0xffff).toLong())
+        require(largeOffset >= HEADER_SIZE && largeOffset + LARGE_FUNC_HEADER_SIZE <= contentEnd) {
+            "LargeFuncHeader offset $largeOffset for function #$funcIdx out of bounds."
+        }
+        val lo = largeOffset.toInt()
+        val rawOffset = u32Le(bundle, lo)
+        val rawParamCount = u32Le(bundle, lo + 4)
+        val rawSize = u32Le(bundle, lo + 8)
+        val rawName = u32Le(bundle, lo + 12)
+        val rawInfoOffset = u32Le(bundle, lo + 16)
+        val rawFrameSize = u32Le(bundle, lo + 20)
+        val rawEnvSize = u32Le(bundle, lo + 24)
+        val rawTail = i32Le(bundle, lo + 28)
+        require(
+            rawOffset <= Int.MAX_VALUE &&
+                rawSize <= Int.MAX_VALUE &&
+                rawName <= Int.MAX_VALUE &&
+                rawOffset >= HEADER_SIZE &&
+                rawOffset + rawSize <= contentEnd
+        ) {
+            "LargeFuncHeader range ($rawOffset + $rawSize) for function #$funcIdx out of bounds."
+        }
+        return FunctionMeta(
+            index = funcIdx,
+            nameId = rawName.toInt(),
+            codeOffset = rawOffset.toInt(),
+            codeSize = rawSize.toInt(),
+            paramCount = rawParamCount.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            infoOffset = rawInfoOffset.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            frameSize = rawFrameSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            environmentSize = rawEnvSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            highestReadCacheIndex = rawTail and 0xff,
+            highestWriteCacheIndex = (rawTail ushr 8) and 0xff,
+            flags = (rawTail ushr 16) and 0xff,
+            overflowed = true,
+        )
     }
 
     private fun applyRemoteConfigReturnConst(
@@ -864,6 +1001,1570 @@ object HermesHbc96 {
         }
         return result
     }
+
+    private data class VideoUploadOutcome(
+        val bytes: ByteArray,
+        val contentEnd: Int,
+        val sites: List<AppliedSite>,
+    )
+
+    private data class GetByIdMatch(
+        val dstReg: Int,
+        val objReg: Int,
+        val cacheIdx: Int,
+        val stringId: Int,
+        val idOffset: Int,
+        val idWidth: Int,
+        val len: Int,
+    )
+
+    private data class PutByIdMatch(
+        val objReg: Int,
+        val valReg: Int,
+        val stringId: Int,
+        val len: Int,
+    )
+
+    private data class PutNewOwnMatch(
+        val objReg: Int,
+        val valReg: Int,
+        val stringId: Int,
+        val len: Int,
+    )
+
+    private data class ClosureMatch(
+        val dstReg: Int,
+        val envReg: Int,
+        val funcIdx: Int,
+        val isGenerator: Boolean,
+        val len: Int,
+    )
+
+    private data class JumpMatch(
+        val targetRelPc: Int,
+        val isConditional: Boolean,
+        val len: Int,
+    )
+
+    private class RegAccess(
+        val writes: IntArray,
+        val reads: IntArray,
+        val len: Int,
+    )
+
+    private class LoadEnvMatch(
+        val dstReg: Int,
+        val envReg: Int,
+        val len: Int,
+    )
+
+    private class StageCBlocks(
+        val startLoadingOff: Int,
+        val mediaProcessingEnd: Int,
+        val homeEnvReg: Int,
+        val undefThisReg: Int,
+    )
+
+    private fun applyEnableCameraRollVideoUpload(
+        bundle: ByteArray,
+        contentEnd: Int,
+        functionCount: Int,
+        stringIds: Map<String, Int>,
+        functionsByName: Map<Int, List<FunctionMeta>>,
+        mutation: Mutation.EnableCameraRollVideoUpload,
+    ): VideoUploadOutcome {
+        val emptyStrId = stringIds.getValue("")
+        val anonNameId = stringIds.getValue("?anon_0_")
+        val homeNameId = stringIds.getValue("Home")
+
+        var currentBytes = bundle
+        var currentEnd = contentEnd
+        val sites = ArrayList<AppliedSite>(4)
+
+        // Stage A: expand picker mediaTypes from MediaTypeOptions.Images -> MediaTypeOptions.All.
+        sites.add(
+            patchCameraRollMediaTypesAll(
+                bundle = currentBytes,
+                candidates = functionsByName.getValue(emptyStrId),
+                stringIds = stringIds,
+            ),
+        )
+
+        // Stage B: raise pre-transcode picker size limit and attach fileType: asset.type.
+        sites.addAll(
+            patchOpenCameraRollGenerator(
+                bundle = currentBytes,
+                candidates = functionsByName.getValue(anonNameId),
+                stringIds = stringIds,
+                maxFileSizeBytes = mutation.maxFileSizeBytes,
+            ),
+        )
+
+        // Stage C: locate Home -> onSuccess + onRecordingFinished factory -> append relocated body.
+        val stageC = patchHomeOnSuccessVideoRouting(
+            bundle = currentBytes,
+            contentEnd = currentEnd,
+            functionCount = functionCount,
+            homeCandidates = functionsByName.getValue(homeNameId),
+            stringIds = stringIds,
+        )
+        currentBytes = stageC.bytes
+        currentEnd = stageC.contentEnd
+        sites.addAll(stageC.sites)
+
+        return VideoUploadOutcome(bytes = currentBytes, contentEnd = currentEnd, sites = sites)
+    }
+
+    private fun patchCameraRollMediaTypesAll(
+        bundle: ByteArray,
+        candidates: List<FunctionMeta>,
+        stringIds: Map<String, Int>,
+    ): AppliedSite {
+        val mediaTypeOptionsId = stringIds.getValue("MediaTypeOptions")
+        val imagesId = stringIds.getValue("Images")
+        val allId = stringIds.getValue("All")
+        val mediaTypesId = stringIds.getValue("mediaTypes")
+        val required = listOf(
+            stringIds.getValue("useCameraRoll"),
+            stringIds.getValue("getFileSize"),
+            mediaTypeOptionsId,
+            imagesId,
+            mediaTypesId,
+        )
+
+        val matchedFuncs = candidates.filter { containsAllStringRefs(bundle, it.codeOffset, it.codeSize, required) }
+        require(matchedFuncs.size == 1) {
+            "Expected 1 useCameraRoll initializer function, found ${matchedFuncs.size}."
+        }
+        val fn = matchedFuncs.single()
+        val codeEnd = fn.codeOffset + fn.codeSize
+
+        var matchCount = 0
+        var patchOff = -1
+        var patchWidth = 0
+        var patchReg = -1
+
+        var pos = fn.codeOffset
+        while (pos < codeEnd) {
+            val g1 = decodeGetById(bundle, pos, codeEnd)
+            if (g1 != null && g1.stringId == mediaTypeOptionsId) {
+                val p2 = pos + g1.len
+                val g2 = decodeGetById(bundle, p2, codeEnd)
+                if (g2 != null && g2.objReg == g1.dstReg && g2.stringId == imagesId) {
+                    val p3 = p2 + g2.len
+                    val put = decodePutById(bundle, p3, codeEnd)
+                    if (put != null && put.valReg == g2.dstReg && put.stringId == mediaTypesId) {
+                        matchCount++
+                        patchOff = g2.idOffset
+                        patchWidth = g2.idWidth
+                        patchReg = g2.dstReg
+                    }
+                }
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+
+        require(matchCount == 1) {
+            "Expected 1 MediaTypeOptions.Images -> mediaTypes site in fn#${fn.index}, found $matchCount."
+        }
+        writeStringIdOperand(bundle, patchOff, patchWidth, allId, "All")
+
+        return AppliedSite(
+            label = "EnableCameraRollVideoUpload:MediaTypeOptions.All",
+            functionIndex = fn.index,
+            patchOffset = patchOff,
+            byteCount = patchWidth,
+            register = patchReg,
+        )
+    }
+
+    private fun patchOpenCameraRollGenerator(
+        bundle: ByteArray,
+        candidates: List<FunctionMeta>,
+        stringIds: Map<String, Int>,
+        maxFileSizeBytes: Int,
+    ): List<AppliedSite> {
+        val reqPermsId = stringIds.getValue("requestMediaLibraryPermissionsAsync")
+        val launchPickerId = stringIds.getValue("launchImageLibraryAsync")
+        val errMsgId = stringIds.getValue("too_large_file_error_message")
+        val logTagId = stringIds.getValue("useCameraRoll - openCameraRoll")
+        val mediaTypesId = stringIds.getValue("MediaTypes")
+        val camRollImgId = stringIds.getValue("cameraRollImage")
+        val typeId = stringIds.getValue("type")
+        val fileTypeId = stringIds.getValue("fileType")
+        val uriId = stringIds.getValue("uri")
+        val required = listOf(reqPermsId, launchPickerId, errMsgId, logTagId, mediaTypesId, camRollImgId, typeId)
+
+        val matchedFuncs = candidates.filter { containsAllStringRefs(bundle, it.codeOffset, it.codeSize, required) }
+        require(matchedFuncs.size == 1) {
+            "Expected 1 openCameraRoll generator function, found ${matchedFuncs.size}."
+        }
+        val fn = matchedFuncs.single()
+        require(!fn.overflowed) {
+            "openCameraRoll fn#${fn.index} unexpectedly uses overflowed header."
+        }
+        val codeEnd = fn.codeOffset + fn.codeSize
+
+        // 1. Rewrite 100 MiB (104_857_600) LoadConstInt threshold in-place.
+        var sizeMatches = 0
+        var sizeImmOff = -1
+        var sizeReg = -1
+
+        var pos = fn.codeOffset
+        while (pos < codeEnd) {
+            if (bundle[pos] == OP_LOAD_CONST_INT && pos + 6 <= codeEnd) {
+                val imm = i32Le(bundle, pos + 2)
+                if (imm == ORIGINAL_PICKER_MAX_FILE_BYTES) {
+                    val reg = bundle[pos + 1].toInt() and 0xff
+                    val nextPos = pos + 6
+                    if (isJGreaterWithReg(bundle, nextPos, codeEnd, reg)) {
+                        sizeMatches++
+                        sizeImmOff = pos + 2
+                        sizeReg = reg
+                    }
+                }
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+        require(sizeMatches == 1) {
+            "Expected 1 max-file-size check ($ORIGINAL_PICKER_MAX_FILE_BYTES) in openCameraRoll fn#${fn.index}, found $sizeMatches."
+        }
+        writeU32Le(bundle, sizeImmOff, maxFileSizeBytes.toLong())
+
+        // 2. Rewrite `env[slot].MediaTypes.cameraRollImage` -> `cameraRollImage` + `fileType: asset.type`.
+        var typeMatches = 0
+        var replaceStart = -1
+        var replaceEnd = -1
+        var rType = -1
+        var rPayload = -1
+        var rAsset = -1
+
+        pos = fn.codeOffset
+        while (pos < codeEnd) {
+            val envLoad = decodeLoadFromEnvironment(bundle, pos, codeEnd)
+            if (envLoad != null) {
+                val rCandidate = envLoad.dstReg
+                val p2 = pos + envLoad.len
+                val g1 = decodeGetById(bundle, p2, codeEnd)
+                if (g1 != null && g1.dstReg == rCandidate && g1.objReg == rCandidate && g1.stringId == mediaTypesId) {
+                    val p3 = p2 + g1.len
+                    val g2 = decodeGetById(bundle, p3, codeEnd)
+                    if (g2 != null && g2.dstReg == rCandidate && g2.objReg == rCandidate && g2.stringId == camRollImgId) {
+                        val p4 = p3 + g2.len
+                        val putType = decodePutNewOwnById(bundle, p4, codeEnd)
+                        if (putType != null && putType.valReg == rCandidate && putType.stringId == typeId) {
+                            val assetReg = findAssetRegAfterType(bundle, p4 + putType.len, codeEnd, uriId)
+                            if (assetReg >= 0) {
+                                typeMatches++
+                                replaceStart = pos
+                                replaceEnd = p4
+                                rType = rCandidate
+                                rPayload = putType.objReg
+                                rAsset = assetReg
+                            }
+                        }
+                    }
+                }
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+        require(typeMatches == 1) {
+            "Expected 1 cameraRollImage payload construction site in openCameraRoll fn#${fn.index}, found $typeMatches."
+        }
+        val windowLen = replaceEnd - replaceStart
+        require(windowLen >= MIN_CALL_STRING_ARG_LEN) {
+            "openCameraRoll rewrite window ($windowLen bytes) too short."
+        }
+        require(!hasBranchIntoRange(bundle, fn, replaceStart + 1, replaceEnd)) {
+            "openCameraRoll jump lands inside [$replaceStart, $replaceEnd)."
+        }
+
+        val maxLocalRegs = fn.frameSize - CALLER_OUTGOING_REGS_RESERVE
+        require(maxLocalRegs > 0 && rType < maxLocalRegs && rPayload < maxLocalRegs && rAsset < maxLocalRegs) {
+            "openCameraRoll fn#${fn.index} frameSize (${fn.frameSize}) violates outgoing register reserve."
+        }
+
+        val rScratch = findDeadLocalRegister(
+            bundle = bundle,
+            fn = fn,
+            fromPcAbs = replaceEnd,
+            maxLocalRegs = maxLocalRegs,
+            excluded = setOf(rType, rPayload, rAsset),
+        )
+        val newReadCacheIdx = fn.highestReadCacheIndex + 1
+        require(newReadCacheIdx <= 0xff) {
+            "openCameraRoll fn#${fn.index} read cache index overflow ($newReadCacheIdx)."
+        }
+
+        val replacement = buildOpenCameraRollTypeAndFileTypeBytes(
+            windowLen = windowLen,
+            rType = rType,
+            rScratch = rScratch,
+            rAsset = rAsset,
+            rPayload = rPayload,
+            camRollImgId = camRollImgId,
+            readCacheIdx = newReadCacheIdx,
+            typeId = typeId,
+            fileTypeId = fileTypeId,
+        )
+        System.arraycopy(replacement, 0, bundle, replaceStart, windowLen)
+        writeSmallFuncHighestReadCacheIndex(bundle, fn.index, newReadCacheIdx)
+
+        return listOf(
+            AppliedSite(
+                label = "EnableCameraRollVideoUpload:MaxFileSize",
+                functionIndex = fn.index,
+                patchOffset = sizeImmOff,
+                byteCount = 4,
+                register = sizeReg,
+            ),
+            AppliedSite(
+                label = "EnableCameraRollVideoUpload:FileTypeTag",
+                functionIndex = fn.index,
+                patchOffset = replaceStart,
+                byteCount = windowLen,
+                register = rScratch,
+            ),
+        )
+    }
+
+    private fun patchHomeOnSuccessVideoRouting(
+        bundle: ByteArray,
+        contentEnd: Int,
+        functionCount: Int,
+        homeCandidates: List<FunctionMeta>,
+        stringIds: Map<String, Int>,
+    ): VideoUploadOutcome {
+        val useCameraRollId = stringIds.getValue("useCameraRoll")
+        val onSuccessPropId = stringIds.getValue("onSuccess")
+        val matchedHome = homeCandidates.filter {
+            containsAllStringRefs(bundle, it.codeOffset, it.codeSize, listOf(useCameraRollId, onSuccessPropId))
+        }
+        require(matchedHome.size == 1) {
+            "Expected 1 Home component function, found ${matchedHome.size}."
+        }
+        val homeFn = matchedHome.single()
+
+        val onSuccessFn = resolveHomeOnSuccessClosure(
+            bundle = bundle,
+            homeFn = homeFn,
+            functionCount = functionCount,
+            contentEnd = contentEnd,
+            stringIds = stringIds,
+        )
+        require(!onSuccessFn.overflowed) {
+            "Home onSuccess fn#${onSuccessFn.index} unexpectedly uses overflowed header."
+        }
+        require((onSuccessFn.flags and FLAG_HAS_EXCEPTION_HANDLER) == 0) {
+            "Home onSuccess fn#${onSuccessFn.index} unexpectedly carries exception handlers."
+        }
+        require((onSuccessFn.flags and FLAG_HAS_DEBUG_INFO) == 0) {
+            "Home onSuccess fn#${onSuccessFn.index} unexpectedly carries debug info."
+        }
+
+        val factoryFn = resolveOnRecordingFinishedFactory(
+            bundle = bundle,
+            homeFn = homeFn,
+            functionCount = functionCount,
+            contentEnd = contentEnd,
+            stringIds = stringIds,
+        )
+
+        val blocks = extractStageCBlocks(bundle, onSuccessFn, stringIds)
+        val newBytes = buildRelocatedOnSuccessBytecode(
+            bundle = bundle,
+            origFn = onSuccessFn,
+            factoryFnIndex = factoryFn.index,
+            blocks = blocks,
+            stringIds = stringIds,
+        )
+
+        val maxLocalReg = maxUsedLocalRegister(newBytes.code)
+        val newFrameSize = maxOf(onSuccessFn.frameSize, maxLocalReg + 12, 16)
+        require(newFrameSize <= MAX_SMALL_FRAME_SIZE) {
+            "Relocated onSuccess frameSize ($newFrameSize) exceeds SmallFuncHeader max ($MAX_SMALL_FRAME_SIZE)."
+        }
+        require(newBytes.code.size <= MAX_SMALL_BYTECODE_SIZE) {
+            "Relocated onSuccess code size (${newBytes.code.size}) exceeds SmallFuncHeader max ($MAX_SMALL_BYTECODE_SIZE)."
+        }
+        validateBytecodeFunction(
+            code = newBytes.code,
+            frameSize = newFrameSize,
+            functionCount = functionCount,
+        )
+
+        val relocOffLong = align4(contentEnd.toLong())
+        require(relocOffLong <= MAX_SMALL_OFFSET.toLong()) {
+            "Relocated onSuccess offset ($relocOffLong) exceeds SmallFuncHeader max ($MAX_SMALL_OFFSET)."
+        }
+        val relocOff = relocOffLong.toInt()
+        val newContentEnd = relocOff + newBytes.code.size
+        val newBundleSize = newContentEnd + SHA1_SIZE
+
+        val out = ByteArray(newBundleSize)
+        System.arraycopy(bundle, 0, out, 0, contentEnd)
+        System.arraycopy(newBytes.code, 0, out, relocOff, newBytes.code.size)
+
+        writeU32Le(out, OFF_FILE_LENGTH, newBundleSize.toLong())
+        writeSmallFuncRelocationHeader(
+            bytes = out,
+            funcIdx = onSuccessFn.index,
+            orig = onSuccessFn,
+            newOffset = relocOff,
+            newSize = newBytes.code.size,
+            newFrameSize = newFrameSize,
+            newHighestReadCacheIndex = newBytes.highestReadCacheIndex,
+        )
+
+        return VideoUploadOutcome(
+            bytes = out,
+            contentEnd = newContentEnd,
+            sites = listOf(
+                AppliedSite(
+                    label = "EnableCameraRollVideoUpload:HomeOnSuccess",
+                    functionIndex = onSuccessFn.index,
+                    patchOffset = relocOff,
+                    byteCount = newBytes.code.size,
+                    register = newFrameSize,
+                ),
+            ),
+        )
+    }
+
+    private fun resolveHomeOnSuccessClosure(
+        bundle: ByteArray,
+        homeFn: FunctionMeta,
+        functionCount: Int,
+        contentEnd: Int,
+        stringIds: Map<String, Int>,
+    ): FunctionMeta {
+        val onSuccessPropId = stringIds.getValue("onSuccess")
+        val requiredOnSuccessStrings = listOf(
+            stringIds.getValue(""),
+            stringIds.getValue("reset"),
+            stringIds.getValue("startLoading"),
+            stringIds.getValue("HomeCaptureStage"),
+            stringIds.getValue("MEDIA_PROCESSING"),
+        )
+
+        val regClosures = HashMap<Int, Set<Int>>()
+        val candidateFuncIds = LinkedHashSet<Int>()
+
+        val codeEnd = homeFn.codeOffset + homeFn.codeSize
+        var pos = homeFn.codeOffset
+        while (pos < codeEnd) {
+            val op = bundle[pos]
+            val closure = decodeCreateClosure(bundle, pos, codeEnd, generatorsOnly = false)
+            if (closure != null) {
+                regClosures[closure.dstReg] = setOf(closure.funcIdx)
+                pos += closure.len
+                continue
+            }
+            if (op == OP_MOV && pos + 3 <= codeEnd) {
+                val dst = bundle[pos + 1].toInt() and 0xff
+                val src = bundle[pos + 2].toInt() and 0xff
+                val srcSet = regClosures[src]
+                if (srcSet != null) regClosures[dst] = srcSet else regClosures.remove(dst)
+                pos += 3
+                continue
+            }
+            val call = decodeCall(bundle, pos, codeEnd)
+            if (call != null) {
+                val propagated = LinkedHashSet<Int>()
+                for (argReg in call.argRegs) {
+                    regClosures[argReg]?.let { propagated.addAll(it) }
+                }
+                if (propagated.isNotEmpty()) regClosures[call.dstReg] = propagated else regClosures.remove(call.dstReg)
+                pos += call.len
+                continue
+            }
+            val putOwn = decodePutNewOwnById(bundle, pos, codeEnd)
+            if (putOwn != null && putOwn.stringId == onSuccessPropId) {
+                regClosures[putOwn.valReg]?.let { candidateFuncIds.addAll(it) }
+                pos += putOwn.len
+                continue
+            }
+            val access = instructionRegAccess(bundle, pos, codeEnd)
+            for (w in access.writes) {
+                regClosures.remove(w)
+            }
+            pos += access.len
+        }
+
+        val verified = candidateFuncIds.mapNotNull { fid ->
+            if (fid !in 0 until functionCount) return@mapNotNull null
+            val meta = readFunctionMeta(bundle, fid, contentEnd)
+            if (containsAllStringRefs(bundle, meta.codeOffset, meta.codeSize, requiredOnSuccessStrings)) meta else null
+        }
+        require(verified.size == 1) {
+            "Expected 1 Home onSuccess closure matching MEDIA_PROCESSING anchors, found ${verified.size}."
+        }
+        return verified.single()
+    }
+
+    private fun resolveOnRecordingFinishedFactory(
+        bundle: ByteArray,
+        homeFn: FunctionMeta,
+        functionCount: Int,
+        contentEnd: Int,
+        stringIds: Map<String, Int>,
+    ): FunctionMeta {
+        val onRecFinishedNameId = stringIds.getValue("onRecordingFinished")
+        val requiredGenStrings = listOf(
+            stringIds.getValue("generateCroppedVideo"),
+            stringIds.getValue("Home-onRecordingFinished"),
+            stringIds.getValue("video_recording_error"),
+        )
+
+        val hop1Closures = collectChildClosures(bundle, homeFn, generatorsOnly = false)
+        val matches = LinkedHashMap<Int, FunctionMeta>()
+
+        for (wrapperIdx in hop1Closures) {
+            if (wrapperIdx !in 0 until functionCount) continue
+            val wrapperMeta = readFunctionMeta(bundle, wrapperIdx, contentEnd)
+            val hop2Closures = collectChildClosures(bundle, wrapperMeta, generatorsOnly = false)
+            for (factoryIdx in hop2Closures) {
+                if (factoryIdx !in 0 until functionCount || factoryIdx in matches) continue
+                val factoryMeta = readFunctionMeta(bundle, factoryIdx, contentEnd)
+                if (isOnRecordingFinishedFactory(
+                        bundle = bundle,
+                        factoryMeta = factoryMeta,
+                        functionCount = functionCount,
+                        contentEnd = contentEnd,
+                        onRecFinishedNameId = onRecFinishedNameId,
+                        requiredGenStrings = requiredGenStrings,
+                    )
+                ) {
+                    matches[factoryIdx] = factoryMeta
+                }
+            }
+        }
+
+        require(matches.size == 1) {
+            "Expected 1 Home onRecordingFinished factory closure (2 hops from Home), found ${matches.size}."
+        }
+        return matches.values.single()
+    }
+
+    private fun isOnRecordingFinishedFactory(
+        bundle: ByteArray,
+        factoryMeta: FunctionMeta,
+        functionCount: Int,
+        contentEnd: Int,
+        onRecFinishedNameId: Int,
+        requiredGenStrings: List<Int>,
+    ): Boolean {
+        val genWrappers = collectChildClosures(bundle, factoryMeta, generatorsOnly = true)
+        val innerClosures = collectChildClosures(bundle, factoryMeta, generatorsOnly = false)
+        if (genWrappers.isEmpty() || innerClosures.isEmpty()) return false
+
+        val hasNamedClosure = innerClosures.any { idx ->
+            idx in 0 until functionCount &&
+                readFunctionMeta(bundle, idx, contentEnd).nameId == onRecFinishedNameId
+        }
+        if (!hasNamedClosure) return false
+
+        val matchedGenBody = genWrappers.mapNotNull { gwIdx ->
+            if (gwIdx !in 0 until functionCount) return@mapNotNull null
+            val gwMeta = readFunctionMeta(bundle, gwIdx, contentEnd)
+            val gens = collectChildClosures(bundle, gwMeta, generatorsOnly = null)
+            gens.firstOrNull { gIdx ->
+                if (gIdx !in 0 until functionCount) return@firstOrNull false
+                val gMeta = readFunctionMeta(bundle, gIdx, contentEnd)
+                containsAllStringRefs(bundle, gMeta.codeOffset, gMeta.codeSize, requiredGenStrings)
+            }?.let { readFunctionMeta(bundle, it, contentEnd) }
+        }
+        if (matchedGenBody.isEmpty()) return false
+
+        // Verify env-depth invariant: factory skips at least the 2 synthetic/wrapper frames (>= 2)
+        // and the async generator body never reads outer envs at depth < 3.
+        if (minGetEnvironmentDepth(bundle, factoryMeta) < 2) return false
+        for (genBody in matchedGenBody) {
+            if (minGetEnvironmentDepth(bundle, genBody) < 3) return false
+        }
+        return true
+    }
+
+    private fun minGetEnvironmentDepth(bundle: ByteArray, fn: FunctionMeta): Int {
+        var minDepth = Int.MAX_VALUE
+        val codeEnd = fn.codeOffset + fn.codeSize
+        var pos = fn.codeOffset
+        while (pos < codeEnd) {
+            if (bundle[pos] == OP_GET_ENVIRONMENT && pos + 3 <= codeEnd) {
+                val depth = bundle[pos + 2].toInt() and 0xff
+                if (depth < minDepth) minDepth = depth
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+        return minDepth
+    }
+
+    private fun extractStageCBlocks(
+        bundle: ByteArray,
+        onSuccessFn: FunctionMeta,
+        stringIds: Map<String, Int>,
+    ): StageCBlocks {
+        val currentId = stringIds.getValue("current")
+        val startLoadingId = stringIds.getValue("startLoading")
+        val stageEnumId = stringIds.getValue("HomeCaptureStage")
+        val mediaProcId = stringIds.getValue("MEDIA_PROCESSING")
+
+        val base = onSuccessFn.codeOffset
+        val codeEnd = base + onSuccessFn.codeSize
+
+        var startLoadingOff = -1
+        var startLoadingEnd = -1
+        var homeEnvReg = -1
+
+        var pos = base
+        while (pos < codeEnd) {
+            val envLoad = decodeLoadFromEnvironment(bundle, pos, codeEnd)
+            if (envLoad != null) {
+                val p2 = pos + envLoad.len
+                val gCurr = decodeGetById(bundle, p2, codeEnd)
+                if (gCurr != null && gCurr.objReg == envLoad.dstReg && gCurr.stringId == currentId) {
+                    val p3 = p2 + gCurr.len
+                    if (p3 + 2 <= codeEnd && bundle[p3] == OP_LOAD_CONST_NULL) {
+                        val p4 = p3 + 2
+                        val jEq = decodeJump(bundle, base, p4, codeEnd)
+                        if (jEq != null && (bundle[p4] == OP_JEQUAL || bundle[p4] == OP_JEQUAL_LONG)) {
+                            val p5 = p4 + jEq.len
+                            val gStart = decodeGetById(bundle, p5, codeEnd)
+                            if (gStart != null && gStart.objReg == gCurr.dstReg && gStart.stringId == startLoadingId) {
+                                val p6 = p5 + gStart.len
+                                val call1 = decodeCall(bundle, p6, codeEnd)
+                                if (call1 != null && bundle[p6] == OP_CALL1 && call1.calleeReg == gStart.dstReg) {
+                                    val candidateEnd = p6 + call1.len
+                                    if (base + jEq.targetRelPc == candidateEnd) {
+                                        startLoadingOff = pos - base
+                                        startLoadingEnd = candidateEnd - base
+                                        homeEnvReg = envLoad.envReg
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+
+        require(startLoadingOff >= 0 && startLoadingEnd > startLoadingOff && homeEnvReg >= 0) {
+            "Could not extract captureButtonRef.current?.startLoading() block in fn#${onSuccessFn.index}."
+        }
+
+        // Media processing block immediately follows startLoadingEnd (exact contiguity).
+        pos = base + startLoadingEnd
+        val envFn = decodeLoadFromEnvironment(bundle, pos, codeEnd)
+        require(envFn != null && envFn.envReg == homeEnvReg) {
+            "Expected setCaptureStage closure load from r$homeEnvReg after startLoading() in fn#${onSuccessFn.index}."
+        }
+        val pGetModEnv = pos + envFn.len
+        require(pGetModEnv + 3 <= codeEnd && bundle[pGetModEnv] == OP_GET_ENVIRONMENT) {
+            "Expected module GetEnvironment in MEDIA_PROCESSING block of fn#${onSuccessFn.index}."
+        }
+        val pLoadStage = pGetModEnv + 3
+        val envStage = decodeLoadFromEnvironment(bundle, pLoadStage, codeEnd)
+        require(envStage != null) {
+            "Expected HomeCaptureStage module load in fn#${onSuccessFn.index}."
+        }
+        val pGetStage = pLoadStage + envStage.len
+        val gStage = decodeGetById(bundle, pGetStage, codeEnd)
+        require(gStage != null && gStage.stringId == stageEnumId) {
+            "Expected GetById HomeCaptureStage in fn#${onSuccessFn.index}."
+        }
+        val pGetVal = pGetStage + gStage.len
+        val gMediaProc = decodeGetById(bundle, pGetVal, codeEnd)
+        require(gMediaProc != null && gMediaProc.stringId == mediaProcId) {
+            "Expected GetById MEDIA_PROCESSING in fn#${onSuccessFn.index}."
+        }
+        val pCall2 = pGetVal + gMediaProc.len
+        val call2 = decodeCall(bundle, pCall2, codeEnd)
+        require(call2 != null && bundle[pCall2] == OP_CALL2) {
+            "Expected Call2 for MEDIA_PROCESSING transition in fn#${onSuccessFn.index}."
+        }
+        val undefThisReg = call2.argRegs[0]
+        require(undefThisReg != homeEnvReg) {
+            "Expected distinct undefined-this register (got r$undefThisReg) from homeEnvReg (r$homeEnvReg) in fn#${onSuccessFn.index}."
+        }
+        val mediaProcEnd = (pCall2 + call2.len) - base
+
+        // Also validate that all jumps in the original body stay within [0, origFn.codeSize).
+        pos = base
+        while (pos < codeEnd) {
+            val jmp = decodeJump(bundle, base, pos, codeEnd)
+            if (jmp != null) {
+                require(jmp.targetRelPc in 0 until onSuccessFn.codeSize) {
+                    "Original fn#${onSuccessFn.index} jump target ${jmp.targetRelPc} outside code bounds."
+                }
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+
+        return StageCBlocks(
+            startLoadingOff = startLoadingOff,
+            mediaProcessingEnd = mediaProcEnd,
+            homeEnvReg = homeEnvReg,
+            undefThisReg = undefThisReg,
+        )
+    }
+
+    private data class RelocatedBytecode(
+        val code: ByteArray,
+        val highestReadCacheIndex: Int,
+    )
+
+    private fun buildRelocatedOnSuccessBytecode(
+        bundle: ByteArray,
+        origFn: FunctionMeta,
+        factoryFnIndex: Int,
+        blocks: StageCBlocks,
+        stringIds: Map<String, Int>,
+    ): RelocatedBytecode {
+        val fileTypeId = stringIds.getValue("fileType")
+        val videoStrId = stringIds.getValue("video")
+        val uriId = stringIds.getValue("uri")
+        val replaceId = stringIds.getValue("replace")
+        val fileSchemeId = stringIds.getValue("file://")
+        val emptyStrId = stringIds.getValue("")
+
+        var nextCacheIdx = maxOf(origFn.highestReadCacheIndex, maxUsedReadCacheIndex(bundle, origFn)) + 1
+        val cFileType = nextCacheIdx++
+        val cUri = nextCacheIdx++
+        val cReplace = nextCacheIdx++
+        require(cReplace <= 0xff) {
+            "Relocated onSuccess read cache index ($cReplace) exceeded 8-bit limit."
+        }
+
+        val buf = ByteArrayList(origFn.codeSize + 192)
+
+        // 1. Check asset.fileType === "video"; jump directly to original onSuccess body otherwise.
+        emitLoadParam(buf, reg = 1, paramIdx = 1)
+        emitGetById(buf, dst = 2, obj = 1, cacheIdx = cFileType, stringId = fileTypeId)
+        emitLoadConstString(buf, dst = 3, stringId = videoStrId)
+        val jmpNotVideoOff = buf.size
+        buf.addByte(OP_JSTRICT_NOT_EQUAL_LONG)
+        buf.addI32Le(0) // Patched once original body start offset is known.
+        buf.addByte(2)
+        buf.addByte(3)
+
+        // 2. Trigger original captureButtonRef.current?.startLoading() and MEDIA_PROCESSING stage.
+        buf.addByte(OP_LOAD_CONST_UNDEFINED)
+        buf.addByte(blocks.undefThisReg)
+        buf.addByte(OP_GET_ENVIRONMENT)
+        buf.addByte(blocks.homeEnvReg)
+        buf.addByte(0)
+        val uiBlockStart = origFn.codeOffset + blocks.startLoadingOff
+        val uiBlockLen = blocks.mediaProcessingEnd - blocks.startLoadingOff
+        buf.addBytes(bundle, uiBlockStart, uiBlockLen)
+
+        // 3. Build bare filesystem path = param1.uri.replace("file://", "") and invoke onRecordingFinished.
+        buf.addByte(OP_LOAD_CONST_UNDEFINED)
+        buf.addByte(0)
+        emitLoadParam(buf, reg = 1, paramIdx = 1)
+        emitGetById(buf, dst = 1, obj = 1, cacheIdx = cUri, stringId = uriId)
+        emitGetById(buf, dst = 2, obj = 1, cacheIdx = cReplace, stringId = replaceId)
+        emitLoadConstString(buf, dst = 3, stringId = fileSchemeId)
+        emitLoadConstString(buf, dst = 4, stringId = emptyStrId)
+        // Call3 r1, r2, r1, r3, r4
+        buf.addByte(OP_CALL3)
+        buf.addByte(1)
+        buf.addByte(2)
+        buf.addByte(1)
+        buf.addByte(3)
+        buf.addByte(4)
+
+        buf.addByte(OP_CREATE_ENVIRONMENT)
+        buf.addByte(3)
+        emitCreateClosure(buf, dst = 3, envReg = 3, funcIdx = factoryFnIndex)
+        // Call1 r2, r3, r0 (factory(undefined) -> onRecordingFinished)
+        buf.addByte(OP_CALL1)
+        buf.addByte(2)
+        buf.addByte(3)
+        buf.addByte(0)
+        // Call2 r0, r2, r0, r1 (onRecordingFinished(undefined, rawPath))
+        buf.addByte(OP_CALL2)
+        buf.addByte(0)
+        buf.addByte(2)
+        buf.addByte(0)
+        buf.addByte(1)
+        buf.addByte(OP_LOAD_CONST_UNDEFINED)
+        buf.addByte(0)
+        buf.addByte(OP_RET)
+        buf.addByte(0)
+
+        // 4. Original onSuccess bytecode verbatim (all internal relative jumps remain intact).
+        val origStartOff = buf.size
+        buf.addBytes(bundle, origFn.codeOffset, origFn.codeSize)
+
+        val out = buf.toByteArray()
+        writeU32Le(out, jmpNotVideoOff + 1, (origStartOff - jmpNotVideoOff).toLong())
+        return RelocatedBytecode(code = out, highestReadCacheIndex = cReplace)
+    }
+
+    private fun buildOpenCameraRollTypeAndFileTypeBytes(
+        windowLen: Int,
+        rType: Int,
+        rScratch: Int,
+        rAsset: Int,
+        rPayload: Int,
+        camRollImgId: Int,
+        readCacheIdx: Int,
+        typeId: Int,
+        fileTypeId: Int,
+    ): ByteArray {
+        val strChoices = if (camRollImgId <= 0xffff) listOf(4, 6) else listOf(6)
+        val getChoices = buildList {
+            if (typeId <= 0xff) add(5)
+            if (typeId <= 0xffff) add(6)
+            add(8)
+        }
+        val putChoices = buildList {
+            if (fileTypeId <= 0xff) add(4)
+            if (fileTypeId <= 0xffff) add(5)
+            add(7)
+        }
+
+        for (strLen in strChoices) {
+            for (getLen in getChoices) {
+                for (putLen in putChoices) {
+                    val coreLen = strLen + getLen + putLen
+                    val slack = windowLen - coreLen
+                    if (slack < 0 || slack == 1) continue
+
+                    val out = ByteArrayList(windowLen)
+                    if (strLen == 4) {
+                        out.addByte(OP_LOAD_CONST_STRING)
+                        out.addByte(rType)
+                        out.addU16Le(camRollImgId)
+                    } else {
+                        out.addByte(OP_LOAD_CONST_STRING_LONG_INDEX)
+                        out.addByte(rType)
+                        out.addI32Le(camRollImgId)
+                    }
+
+                    when (getLen) {
+                        5 -> {
+                            out.addByte(OP_GET_BY_ID_SHORT)
+                            out.addByte(rScratch)
+                            out.addByte(rAsset)
+                            out.addByte(readCacheIdx)
+                            out.addByte(typeId)
+                        }
+                        6 -> {
+                            out.addByte(OP_GET_BY_ID)
+                            out.addByte(rScratch)
+                            out.addByte(rAsset)
+                            out.addByte(readCacheIdx)
+                            out.addU16Le(typeId)
+                        }
+                        else -> {
+                            out.addByte(OP_GET_BY_ID_LONG)
+                            out.addByte(rScratch)
+                            out.addByte(rAsset)
+                            out.addByte(readCacheIdx)
+                            out.addI32Le(typeId)
+                        }
+                    }
+
+                    when (putLen) {
+                        4 -> {
+                            out.addByte(OP_PUT_NEW_OWN_BY_ID_SHORT)
+                            out.addByte(rPayload)
+                            out.addByte(rScratch)
+                            out.addByte(fileTypeId)
+                        }
+                        5 -> {
+                            out.addByte(OP_PUT_NEW_OWN_BY_ID)
+                            out.addByte(rPayload)
+                            out.addByte(rScratch)
+                            out.addU16Le(fileTypeId)
+                        }
+                        else -> {
+                            out.addByte(OP_PUT_NEW_OWN_BY_ID_LONG)
+                            out.addByte(rPayload)
+                            out.addByte(rScratch)
+                            out.addI32Le(fileTypeId)
+                        }
+                    }
+
+                    var rem = slack
+                    if ((rem and 1) == 1) {
+                        out.addByte(OP_MOV)
+                        out.addByte(rScratch)
+                        out.addByte(rScratch)
+                        rem -= 3
+                    }
+                    while (rem > 0) {
+                        out.addByte(OP_LOAD_CONST_UNDEFINED)
+                        out.addByte(rScratch)
+                        rem -= 2
+                    }
+                    return out.toByteArray()
+                }
+            }
+        }
+        throw IllegalArgumentException(
+            "Unable to fit exact $windowLen-byte openCameraRoll replacement for string IDs " +
+                "(cameraRollImage=$camRollImgId, type=$typeId, fileType=$fileTypeId).",
+        )
+    }
+
+    private fun validateBytecodeFunction(
+        code: ByteArray,
+        frameSize: Int,
+        functionCount: Int,
+    ) {
+        var pos = 0
+        while (pos < code.size) {
+            val opId = code[pos].toInt() and 0xff
+            require(opId in OPCODE_LENGTHS.indices) {
+                "Invalid HBC v96 opcode 0x${opId.toString(16)} at +$pos."
+            }
+            val len = OPCODE_LENGTHS[opId]
+            require(pos + len <= code.size) {
+                "Truncated instruction 0x${opId.toString(16)} at +$pos (len=$len, size=${code.size})."
+            }
+            val access = instructionRegAccess(code, pos, code.size)
+            for (r in access.writes) {
+                require(r in 0 until frameSize) {
+                    "Write register r$r out of frameSize $frameSize at +$pos."
+                }
+            }
+            for (r in access.reads) {
+                require(r in 0 until frameSize) {
+                    "Read register r$r out of frameSize $frameSize at +$pos."
+                }
+            }
+            val jmp = decodeJump(code, 0, pos, code.size)
+            if (jmp != null) {
+                require(jmp.targetRelPc in 0 until code.size) {
+                    "Jump target ${jmp.targetRelPc} at +$pos outside code size ${code.size}."
+                }
+            }
+            val closure = decodeCreateClosure(code, pos, code.size, generatorsOnly = null)
+            if (closure != null) {
+                require(closure.funcIdx in 0 until functionCount) {
+                    "Closure target fn#${closure.funcIdx} at +$pos exceeds functionCount $functionCount."
+                }
+            }
+            pos += len
+        }
+    }
+
+    private fun findDeadLocalRegister(
+        bundle: ByteArray,
+        fn: FunctionMeta,
+        fromPcAbs: Int,
+        maxLocalRegs: Int,
+        excluded: Set<Int>,
+    ): Int {
+        val base = fn.codeOffset
+        val codeEnd = base + fn.codeSize
+        val roots = ArrayList<Int>(4)
+        roots.add(fromPcAbs)
+        if ((fn.flags and FLAG_HAS_EXCEPTION_HANDLER) != 0) {
+            var scan = base
+            while (scan < codeEnd) {
+                if (bundle[scan] == 0x5d.toByte()) {
+                    roots.add(scan)
+                }
+                scan += stepInstruction(bundle, scan, codeEnd)
+            }
+        }
+
+        for (candidate in (maxLocalRegs - 1) downTo 0) {
+            if (candidate in excluded) continue
+            if (!canReadBeforeWrite(bundle, base, codeEnd, roots, candidate)) {
+                return candidate
+            }
+        }
+        throw IllegalArgumentException(
+            "No dead scratch register available below $maxLocalRegs in fn#${fn.index}.",
+        )
+    }
+
+    private fun canReadBeforeWrite(
+        bundle: ByteArray,
+        base: Int,
+        codeEnd: Int,
+        rootsAbs: List<Int>,
+        targetReg: Int,
+    ): Boolean {
+        val visited = HashSet<Int>()
+        val queue = ArrayDeque<Int>(16)
+        for (r in rootsAbs) {
+            if (visited.add(r)) queue.addLast(r)
+        }
+        while (queue.isNotEmpty()) {
+            var pos = queue.removeFirst()
+            while (pos in base until codeEnd) {
+                val access = instructionRegAccess(bundle, pos, codeEnd)
+                if (targetReg in access.reads) return true
+                if (targetReg in access.writes) break
+
+                val op = bundle[pos]
+                if (op == OP_RET || op == 0x5f.toByte() || op == OP_UNREACHABLE) break
+                val jmp = decodeJump(bundle, base, pos, codeEnd)
+                if (jmp != null) {
+                    val targetAbs = base + jmp.targetRelPc
+                    if (targetAbs in base until codeEnd && visited.add(targetAbs)) {
+                        queue.addLast(targetAbs)
+                    }
+                    if (!jmp.isConditional) break
+                }
+                pos += access.len
+                if (!visited.add(pos)) break
+            }
+        }
+        return false
+    }
+
+    private fun hasBranchIntoRange(
+        bundle: ByteArray,
+        fn: FunctionMeta,
+        startAbs: Int,
+        endAbs: Int,
+    ): Boolean {
+        val base = fn.codeOffset
+        val codeEnd = base + fn.codeSize
+        var pos = base
+        while (pos < codeEnd) {
+            val jmp = decodeJump(bundle, base, pos, codeEnd)
+            if (jmp != null) {
+                val absTarget = base + jmp.targetRelPc
+                if (absTarget in startAbs until endAbs) return true
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+        return false
+    }
+
+    private fun maxUsedReadCacheIndex(bundle: ByteArray, fn: FunctionMeta): Int {
+        var maxIdx = 0
+        val codeEnd = fn.codeOffset + fn.codeSize
+        var pos = fn.codeOffset
+        while (pos < codeEnd) {
+            val g = decodeGetById(bundle, pos, codeEnd)
+            if (g != null && g.cacheIdx > maxIdx) {
+                maxIdx = g.cacheIdx
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+        return maxIdx
+    }
+
+    private fun maxUsedLocalRegister(code: ByteArray): Int {
+        var maxReg = 0
+        var pos = 0
+        while (pos < code.size) {
+            val access = instructionRegAccess(code, pos, code.size)
+            for (r in access.writes) if (r > maxReg) maxReg = r
+            for (r in access.reads) if (r > maxReg) maxReg = r
+            pos += access.len
+        }
+        return maxReg
+    }
+
+    private fun findAssetRegAfterType(bundle: ByteArray, fromPos: Int, codeEnd: Int, uriId: Int): Int {
+        var pos = fromPos
+        var steps = 0
+        while (pos < codeEnd && steps < 12) {
+            val g = decodeGetById(bundle, pos, codeEnd)
+            if (g != null && g.stringId == uriId) {
+                return g.objReg
+            }
+            if (bundle[pos] == OP_RET || decodeCall(bundle, pos, codeEnd) != null) {
+                break
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+            steps++
+        }
+        return -1
+    }
+
+    private fun collectChildClosures(
+        bundle: ByteArray,
+        fn: FunctionMeta,
+        generatorsOnly: Boolean?,
+    ): List<Int> {
+        val out = ArrayList<Int>(8)
+        val codeEnd = fn.codeOffset + fn.codeSize
+        var pos = fn.codeOffset
+        while (pos < codeEnd) {
+            val closure = decodeCreateClosure(bundle, pos, codeEnd, generatorsOnly)
+            if (closure != null) {
+                out.add(closure.funcIdx)
+            }
+            pos += stepInstruction(bundle, pos, codeEnd)
+        }
+        return out
+    }
+
+    private fun isJGreaterWithReg(bundle: ByteArray, pos: Int, codeEnd: Int, reg: Int): Boolean {
+        if (pos >= codeEnd) return false
+        return when (bundle[pos]) {
+            OP_JGREATER -> pos + 4 <= codeEnd &&
+                ((bundle[pos + 2].toInt() and 0xff) == reg || (bundle[pos + 3].toInt() and 0xff) == reg)
+            OP_JGREATER_LONG -> pos + 7 <= codeEnd &&
+                ((bundle[pos + 5].toInt() and 0xff) == reg || (bundle[pos + 6].toInt() and 0xff) == reg)
+            else -> false
+        }
+    }
+
+    private fun writeSmallFuncHighestReadCacheIndex(bundle: ByteArray, funcIdx: Int, newCacheIdx: Int) {
+        val hOff = HEADER_SIZE + funcIdx * SMALL_FUNC_HEADER_SIZE
+        val w3 = i32Le(bundle, hOff + 12)
+        val updatedW3 = (w3 and 0xffff00ff.toInt()) or ((newCacheIdx and 0xff) shl 8)
+        writeU32Le(bundle, hOff + 12, updatedW3.toLong() and 0xffffffffL)
+    }
+
+    private fun writeSmallFuncRelocationHeader(
+        bytes: ByteArray,
+        funcIdx: Int,
+        orig: FunctionMeta,
+        newOffset: Int,
+        newSize: Int,
+        newFrameSize: Int,
+        newHighestReadCacheIndex: Int,
+    ) {
+        val hOff = HEADER_SIZE + funcIdx * SMALL_FUNC_HEADER_SIZE
+        val w0 = (newOffset and 0x1ffffff) or ((orig.paramCount and 0x7f) shl 25)
+        val w1 = (newSize and 0x7fff) or ((orig.nameId and 0x1ffff) shl 15)
+        val w2 = (orig.infoOffset and 0x1ffffff) or ((newFrameSize and 0x7f) shl 25)
+        val w3 = (orig.environmentSize and 0xff) or
+            ((newHighestReadCacheIndex and 0xff) shl 8) or
+            ((orig.highestWriteCacheIndex and 0xff) shl 16) or
+            ((orig.flags and 0xff) shl 24)
+        writeU32Le(bytes, hOff, w0.toLong() and 0xffffffffL)
+        writeU32Le(bytes, hOff + 4, w1.toLong() and 0xffffffffL)
+        writeU32Le(bytes, hOff + 8, w2.toLong() and 0xffffffffL)
+        writeU32Le(bytes, hOff + 12, w3.toLong() and 0xffffffffL)
+    }
+
+    private fun writeStringIdOperand(bytes: ByteArray, offset: Int, width: Int, stringId: Int, label: String) {
+        when (width) {
+            1 -> {
+                require(stringId in 0..0xff) { "String ID $stringId for '$label' exceeds 8-bit operand range." }
+                bytes[offset] = stringId.toByte()
+            }
+            2 -> {
+                require(stringId in 0..0xffff) { "String ID $stringId for '$label' exceeds 16-bit operand range." }
+                writeU16Le(bytes, offset, stringId)
+            }
+            4 -> writeU32Le(bytes, offset, stringId.toLong())
+            else -> throw IllegalArgumentException("Unsupported string operand width: $width.")
+        }
+    }
+
+    private fun decodeGetById(bundle: ByteArray, pos: Int, codeEnd: Int): GetByIdMatch? {
+        if (pos >= codeEnd) return null
+        return when (bundle[pos]) {
+            OP_GET_BY_ID_SHORT -> if (pos + 5 <= codeEnd) {
+                GetByIdMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    objReg = bundle[pos + 2].toInt() and 0xff,
+                    cacheIdx = bundle[pos + 3].toInt() and 0xff,
+                    stringId = bundle[pos + 4].toInt() and 0xff,
+                    idOffset = pos + 4,
+                    idWidth = 1,
+                    len = 5,
+                )
+            } else null
+            OP_GET_BY_ID -> if (pos + 6 <= codeEnd) {
+                GetByIdMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    objReg = bundle[pos + 2].toInt() and 0xff,
+                    cacheIdx = bundle[pos + 3].toInt() and 0xff,
+                    stringId = u16Le(bundle, pos + 4),
+                    idOffset = pos + 4,
+                    idWidth = 2,
+                    len = 6,
+                )
+            } else null
+            OP_GET_BY_ID_LONG -> if (pos + 8 <= codeEnd) {
+                val sid = u32Le(bundle, pos + 4).takeIf { it <= Int.MAX_VALUE }?.toInt() ?: return null
+                GetByIdMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    objReg = bundle[pos + 2].toInt() and 0xff,
+                    cacheIdx = bundle[pos + 3].toInt() and 0xff,
+                    stringId = sid,
+                    idOffset = pos + 4,
+                    idWidth = 4,
+                    len = 8,
+                )
+            } else null
+            else -> null
+        }
+    }
+
+    private fun decodePutById(bundle: ByteArray, pos: Int, codeEnd: Int): PutByIdMatch? {
+        if (pos >= codeEnd) return null
+        return when (bundle[pos]) {
+            OP_PUT_BY_ID, OP_TRY_PUT_BY_ID -> if (pos + 6 <= codeEnd) {
+                PutByIdMatch(
+                    objReg = bundle[pos + 1].toInt() and 0xff,
+                    valReg = bundle[pos + 2].toInt() and 0xff,
+                    stringId = u16Le(bundle, pos + 4),
+                    len = 6,
+                )
+            } else null
+            OP_PUT_BY_ID_LONG, OP_TRY_PUT_BY_ID_LONG -> if (pos + 8 <= codeEnd) {
+                val sid = u32Le(bundle, pos + 4).takeIf { it <= Int.MAX_VALUE }?.toInt() ?: return null
+                PutByIdMatch(
+                    objReg = bundle[pos + 1].toInt() and 0xff,
+                    valReg = bundle[pos + 2].toInt() and 0xff,
+                    stringId = sid,
+                    len = 8,
+                )
+            } else null
+            else -> null
+        }
+    }
+
+    private fun decodePutNewOwnById(bundle: ByteArray, pos: Int, codeEnd: Int): PutNewOwnMatch? {
+        if (pos >= codeEnd) return null
+        return when (bundle[pos]) {
+            OP_PUT_NEW_OWN_BY_ID_SHORT -> if (pos + 4 <= codeEnd) {
+                PutNewOwnMatch(
+                    objReg = bundle[pos + 1].toInt() and 0xff,
+                    valReg = bundle[pos + 2].toInt() and 0xff,
+                    stringId = bundle[pos + 3].toInt() and 0xff,
+                    len = 4,
+                )
+            } else null
+            OP_PUT_NEW_OWN_BY_ID, OP_PUT_NEW_OWN_NE_BY_ID -> if (pos + 5 <= codeEnd) {
+                PutNewOwnMatch(
+                    objReg = bundle[pos + 1].toInt() and 0xff,
+                    valReg = bundle[pos + 2].toInt() and 0xff,
+                    stringId = u16Le(bundle, pos + 3),
+                    len = 5,
+                )
+            } else null
+            OP_PUT_NEW_OWN_BY_ID_LONG, OP_PUT_NEW_OWN_NE_BY_ID_LONG -> if (pos + 7 <= codeEnd) {
+                val sid = u32Le(bundle, pos + 3).takeIf { it <= Int.MAX_VALUE }?.toInt() ?: return null
+                PutNewOwnMatch(
+                    objReg = bundle[pos + 1].toInt() and 0xff,
+                    valReg = bundle[pos + 2].toInt() and 0xff,
+                    stringId = sid,
+                    len = 7,
+                )
+            } else null
+            else -> null
+        }
+    }
+
+    private fun decodeLoadFromEnvironment(bundle: ByteArray, pos: Int, codeEnd: Int): LoadEnvMatch? {
+        if (pos >= codeEnd) return null
+        return when (bundle[pos]) {
+            OP_LOAD_FROM_ENVIRONMENT -> if (pos + 4 <= codeEnd) {
+                LoadEnvMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    envReg = bundle[pos + 2].toInt() and 0xff,
+                    len = 4,
+                )
+            } else null
+            0x2f.toByte() -> if (pos + 5 <= codeEnd) {
+                LoadEnvMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    envReg = bundle[pos + 2].toInt() and 0xff,
+                    len = 5,
+                )
+            } else null
+            else -> null
+        }
+    }
+
+    private fun decodeCreateClosure(
+        bundle: ByteArray,
+        pos: Int,
+        codeEnd: Int,
+        generatorsOnly: Boolean?,
+    ): ClosureMatch? {
+        if (pos >= codeEnd) return null
+        val op = bundle[pos]
+        val isGen = when (op) {
+            OP_CREATE_CLOSURE, OP_CREATE_CLOSURE_LONG_INDEX -> false
+            OP_CREATE_GENERATOR_CLOSURE, OP_CREATE_GENERATOR_CLOSURE_LONG_INDEX,
+            OP_CREATE_GENERATOR, OP_CREATE_GENERATOR_LONG_INDEX -> true
+            else -> return null
+        }
+        if (generatorsOnly != null && isGen != generatorsOnly) return null
+
+        val isLong = op == OP_CREATE_CLOSURE_LONG_INDEX ||
+            op == OP_CREATE_GENERATOR_CLOSURE_LONG_INDEX ||
+            op == OP_CREATE_GENERATOR_LONG_INDEX
+        val len = if (isLong) 7 else 5
+        if (pos + len > codeEnd) return null
+        val fnIdx = if (isLong) {
+            u32Le(bundle, pos + 3).takeIf { it <= Int.MAX_VALUE }?.toInt() ?: return null
+        } else {
+            u16Le(bundle, pos + 3)
+        }
+        return ClosureMatch(
+            dstReg = bundle[pos + 1].toInt() and 0xff,
+            envReg = bundle[pos + 2].toInt() and 0xff,
+            funcIdx = fnIdx,
+            isGenerator = isGen,
+            len = len,
+        )
+    }
+
+    private class CallMatch(
+        val dstReg: Int,
+        val calleeReg: Int,
+        val argRegs: IntArray,
+        val len: Int,
+    )
+
+    private fun decodeCall(bundle: ByteArray, pos: Int, codeEnd: Int): CallMatch? {
+        if (pos >= codeEnd) return null
+        return when (bundle[pos]) {
+            OP_CALL1 -> if (pos + 4 <= codeEnd) {
+                CallMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    calleeReg = bundle[pos + 2].toInt() and 0xff,
+                    argRegs = intArrayOf(bundle[pos + 3].toInt() and 0xff),
+                    len = 4,
+                )
+            } else null
+            OP_CALL2 -> if (pos + 5 <= codeEnd) {
+                CallMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    calleeReg = bundle[pos + 2].toInt() and 0xff,
+                    argRegs = intArrayOf(
+                        bundle[pos + 3].toInt() and 0xff,
+                        bundle[pos + 4].toInt() and 0xff,
+                    ),
+                    len = 5,
+                )
+            } else null
+            OP_CALL3 -> if (pos + 6 <= codeEnd) {
+                CallMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    calleeReg = bundle[pos + 2].toInt() and 0xff,
+                    argRegs = intArrayOf(
+                        bundle[pos + 3].toInt() and 0xff,
+                        bundle[pos + 4].toInt() and 0xff,
+                        bundle[pos + 5].toInt() and 0xff,
+                    ),
+                    len = 6,
+                )
+            } else null
+            0x55.toByte() -> if (pos + 7 <= codeEnd) {
+                CallMatch(
+                    dstReg = bundle[pos + 1].toInt() and 0xff,
+                    calleeReg = bundle[pos + 2].toInt() and 0xff,
+                    argRegs = intArrayOf(
+                        bundle[pos + 3].toInt() and 0xff,
+                        bundle[pos + 4].toInt() and 0xff,
+                        bundle[pos + 5].toInt() and 0xff,
+                        bundle[pos + 6].toInt() and 0xff,
+                    ),
+                    len = 7,
+                )
+            } else null
+            else -> null
+        }
+    }
+
+    private fun decodeJump(bundle: ByteArray, funcBase: Int, pos: Int, codeEnd: Int): JumpMatch? {
+        val op = bundle[pos].toInt() and 0xff
+        if (op !in 0x8e..0xbf) return null
+        val isLong = (op and 1) == 1
+        val len = OPCODE_LENGTHS[op]
+        if (pos + len > codeEnd) return null
+        val rel = if (isLong) i32Le(bundle, pos + 1) else bundle[pos + 1].toInt()
+        val relPc = (pos - funcBase) + rel
+        return JumpMatch(
+            targetRelPc = relPc,
+            isConditional = op != 0x8e && op != 0x8f,
+            len = len,
+        )
+    }
+
+    private fun instructionRegAccess(bundle: ByteArray, pos: Int, codeEnd: Int): RegAccess {
+        val op = bundle[pos].toInt() and 0xff
+        val len = stepInstruction(bundle, pos, codeEnd)
+        if (pos + len > codeEnd || op !in OPCODE_LENGTHS.indices) {
+            return RegAccess(IntArray(0), IntArray(0), len)
+        }
+        fun r(off: Int): Int = bundle[pos + off].toInt() and 0xff
+
+        if (op == 0x09) { // MovLong Reg32, Reg32
+            return RegAccess(intArrayOf(i32Le(bundle, pos + 1)), intArrayOf(i32Le(bundle, pos + 5)), len)
+        }
+        if (op in 0x8e..0xbf) {
+            return when (op) {
+                0x8e, 0x8f -> RegAccess(IntArray(0), IntArray(0), len)
+                0x90, 0x92, 0x94, 0x96 -> RegAccess(IntArray(0), intArrayOf(r(2)), len)
+                0x91, 0x93, 0x95, 0x97 -> RegAccess(IntArray(0), intArrayOf(r(5)), len)
+                else -> if ((op and 1) == 0) {
+                    RegAccess(IntArray(0), intArrayOf(r(2), r(3)), len)
+                } else {
+                    RegAccess(IntArray(0), intArrayOf(r(5), r(6)), len)
+                }
+            }
+        }
+        return when (op) {
+            0x00, 0x34, 0x35, 0x61, 0x62, 0x63, 0x86, 0x88 -> RegAccess(IntArray(0), IntArray(0), len)
+            0x2a, 0x2c -> RegAccess(IntArray(0), intArrayOf(r(1), r(3)), len)
+            0x2b, 0x2d -> RegAccess(IntArray(0), intArrayOf(r(1), r(4)), len)
+            0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48 ->
+                RegAccess(IntArray(0), intArrayOf(r(1), r(2)), len)
+            0x46, 0x4a, 0x4b -> RegAccess(IntArray(0), intArrayOf(r(1), r(2), r(3)), len)
+            0x4c -> RegAccess(IntArray(0), intArrayOf(r(1), r(2), r(3), r(4)), len)
+            0x4d -> RegAccess(intArrayOf(r(1), r(3), r(4)), intArrayOf(r(2), r(3), r(4)), len)
+            0x4e -> RegAccess(intArrayOf(r(1), r(4)), intArrayOf(r(2), r(3), r(4), r(5)), len)
+            0x5c, 0x5f, 0x85, 0x8d -> RegAccess(IntArray(0), intArrayOf(r(1)), len)
+            0x87 -> RegAccess(intArrayOf(r(1), r(2)), IntArray(0), len)
+            0x01, 0x02, 0x03, 0x05, 0x06, 0x07, 0x29, 0x30, 0x31, 0x32,
+            0x52, 0x58, 0x59, 0x5a, 0x5b, 0x5d, 0x6c, 0x6d, 0x6e, 0x6f, 0x70,
+            0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a,
+            0x7c, 0x83, 0x84 -> RegAccess(intArrayOf(r(1)), IntArray(0), len)
+            0x04, 0x08, 0x0a, 0x0b, 0x0c, 0x0d, 0x25, 0x26, 0x2e, 0x2f,
+            0x33, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x4f, 0x50, 0x56, 0x57,
+            0x5e, 0x60, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x7b, 0x7d,
+            0x7e, 0x7f, 0x80, 0x82, 0x89, 0x8a, 0x8b -> RegAccess(intArrayOf(r(1)), intArrayOf(r(2)), len)
+            0x53 -> RegAccess(intArrayOf(r(1)), intArrayOf(r(2), r(3), r(4)), len)
+            0x54 -> RegAccess(intArrayOf(r(1)), intArrayOf(r(2), r(3), r(4), r(5)), len)
+            0x55 -> RegAccess(intArrayOf(r(1)), intArrayOf(r(2), r(3), r(4), r(5), r(6)), len)
+            else -> RegAccess(intArrayOf(r(1)), intArrayOf(r(2), r(3)), len)
+        }
+    }
+
+    private fun emitLoadParam(buf: ByteArrayList, reg: Int, paramIdx: Int) {
+        buf.addByte(OP_LOAD_PARAM)
+        buf.addByte(reg)
+        buf.addByte(paramIdx)
+    }
+
+    private fun emitGetById(buf: ByteArrayList, dst: Int, obj: Int, cacheIdx: Int, stringId: Int) {
+        when {
+            stringId <= 0xff -> {
+                buf.addByte(OP_GET_BY_ID_SHORT)
+                buf.addByte(dst)
+                buf.addByte(obj)
+                buf.addByte(cacheIdx)
+                buf.addByte(stringId)
+            }
+            stringId <= 0xffff -> {
+                buf.addByte(OP_GET_BY_ID)
+                buf.addByte(dst)
+                buf.addByte(obj)
+                buf.addByte(cacheIdx)
+                buf.addU16Le(stringId)
+            }
+            else -> {
+                buf.addByte(OP_GET_BY_ID_LONG)
+                buf.addByte(dst)
+                buf.addByte(obj)
+                buf.addByte(cacheIdx)
+                buf.addI32Le(stringId)
+            }
+        }
+    }
+
+    private fun emitLoadConstString(buf: ByteArrayList, dst: Int, stringId: Int) {
+        if (stringId <= 0xffff) {
+            buf.addByte(OP_LOAD_CONST_STRING)
+            buf.addByte(dst)
+            buf.addU16Le(stringId)
+        } else {
+            buf.addByte(OP_LOAD_CONST_STRING_LONG_INDEX)
+            buf.addByte(dst)
+            buf.addI32Le(stringId)
+        }
+    }
+
+    private fun emitCreateClosure(buf: ByteArrayList, dst: Int, envReg: Int, funcIdx: Int) {
+        if (funcIdx <= 0xffff) {
+            buf.addByte(OP_CREATE_CLOSURE)
+            buf.addByte(dst)
+            buf.addByte(envReg)
+            buf.addU16Le(funcIdx)
+        } else {
+            buf.addByte(OP_CREATE_CLOSURE_LONG_INDEX)
+            buf.addByte(dst)
+            buf.addByte(envReg)
+            buf.addI32Le(funcIdx)
+        }
+    }
+
+    private class ByteArrayList(initialCapacity: Int) {
+        private var data = ByteArray(initialCapacity)
+        var size: Int = 0
+            private set
+
+        fun addByte(value: Byte) {
+            ensureCapacity(1)
+            data[size++] = value
+        }
+
+        fun addByte(value: Int) = addByte((value and 0xff).toByte())
+
+        fun addU16Le(value: Int) {
+            ensureCapacity(2)
+            writeU16Le(data, size, value)
+            size += 2
+        }
+
+        fun addI32Le(value: Int) {
+            ensureCapacity(4)
+            writeU32Le(data, size, value.toLong() and 0xffffffffL)
+            size += 4
+        }
+
+        fun addBytes(src: ByteArray, offset: Int, length: Int) {
+            ensureCapacity(length)
+            System.arraycopy(src, offset, data, size, length)
+            size += length
+        }
+
+        fun toByteArray(): ByteArray = data.copyOf(size)
+
+        private fun ensureCapacity(extra: Int) {
+            val needed = size + extra
+            if (needed <= data.size) return
+            var next = data.size.coerceAtLeast(32)
+            while (next < needed) next = next shl 1
+            data = data.copyOf(next)
+        }
+    }
+
+    private val VIDEO_UPLOAD_REQUIRED_STRINGS = listOf(
+        "",
+        "?anon_0_",
+        "Home",
+        "useCameraRoll",
+        "getFileSize",
+        "MediaTypeOptions",
+        "Images",
+        "All",
+        "mediaTypes",
+        "requestMediaLibraryPermissionsAsync",
+        "launchImageLibraryAsync",
+        "too_large_file_error_message",
+        "useCameraRoll - openCameraRoll",
+        "MediaTypes",
+        "cameraRollImage",
+        "type",
+        "fileType",
+        "uri",
+        "onSuccess",
+        "reset",
+        "current",
+        "startLoading",
+        "HomeCaptureStage",
+        "MEDIA_PROCESSING",
+        "onRecordingFinished",
+        "generateCroppedVideo",
+        "Home-onRecordingFinished",
+        "video_recording_error",
+        "video",
+        "replace",
+        "file://",
+    )
 
     private const val MIN_CALL_STRING_ARG_LEN = 14
 
